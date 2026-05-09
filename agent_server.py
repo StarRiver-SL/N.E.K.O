@@ -806,6 +806,10 @@ async def _fire_agent_llm_connectivity_check(*, queue: bool = False) -> None:
     async with _llm_check_lock:
         adapter = Modules.computer_use
         if adapter is None:
+            _set_capability("computer_use", False, "AGENT_CU_MODULE_NOT_LOADED")
+            _set_capability("browser_use", False, "AGENT_CU_MODULE_NOT_LOADED")
+            _bump_state_revision()
+            await _emit_agent_status_update()
             return
 
         def _probe():
@@ -842,7 +846,9 @@ async def _fire_agent_llm_connectivity_check(*, queue: bool = False) -> None:
             reason = "" if ok else "AGENT_LLM_UNREACHABLE"
             _set_capability("computer_use", ok, reason)
             bu = Modules.browser_use
-            if bu is not None:
+            if bu is None:
+                _set_capability("browser_use", False, "AGENT_BU_MODULE_NOT_LOADED")
+            else:
                 if not ok:
                     _set_capability("browser_use", False, reason)
                 elif not getattr(bu, "_ready_import", False):
@@ -4450,9 +4456,25 @@ async def agent_command(payload: Dict[str, Any]):
     lanlan_name = (payload or {}).get("lanlan_name")
     if command == "set_agent_enabled":
         enabled = bool((payload or {}).get("enabled"))
+        gate = _check_agent_api_gate()
         if enabled:
             Modules.analyzer_enabled = True
             Modules.analyzer_profile = (payload or {}).get("profile", {}) or {}
+            if gate.get("ready") is True:
+                adapter_refreshed = _try_refresh_computer_use_adapter(force=True)
+                if not adapter_refreshed and Modules.computer_use is not None:
+                    logger.info("[Agent] ComputerUse adapter refresh failed; falling back to existing adapter")
+                if Modules.computer_use is not None:
+                    _set_capability("computer_use", False, "AGENT_PRECHECK_PENDING")
+                    _set_capability("browser_use", False, "AGENT_PRECHECK_PENDING")
+                    asyncio.ensure_future(_fire_agent_llm_connectivity_check(queue=True))
+                else:
+                    _set_capability("computer_use", False, "AGENT_CU_MODULE_NOT_LOADED")
+                    _set_capability("browser_use", False, "AGENT_CU_MODULE_NOT_LOADED")
+            else:
+                first_reason = (gate.get("reasons") or ["AGENT_ENDPOINT_NOT_CONFIGURED"])[0]
+                _set_capability("computer_use", False, first_reason)
+                _set_capability("browser_use", False, first_reason)
         else:
             Modules.analyzer_enabled = False
             Modules.analyzer_profile = {}
@@ -4470,7 +4492,13 @@ async def agent_command(payload: Dict[str, Any]):
         await _emit_agent_status_update(lanlan_name=lanlan_name)
         total_ms = round((time.perf_counter() - t0) * 1000, 2)
         logger.info("[AgentTiming] request_id=%s command=%s total_ms=%s", request_id, command, total_ms)
-        return {"success": True, "request_id": request_id, "timing": {"agent_total_ms": total_ms}}
+        return {
+            "success": True,
+            "request_id": request_id,
+            "is_free_version": bool(gate.get("is_free_version")),
+            "agent_api_gate": gate,
+            "timing": {"agent_total_ms": total_ms},
+        }
     if command == "set_flag":
         key = (payload or {}).get("key")
         value = bool((payload or {}).get("value"))
