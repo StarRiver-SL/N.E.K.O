@@ -27,6 +27,7 @@ from .models import (
     DATA_SOURCE_MEMORY_READER,
     DATA_SOURCE_OCR_READER,
     GalgameConfig,
+    GalgameLLMConfig,
     MODE_CHOICE_ADVISOR,
     MODE_COMPANION,
     MODES,
@@ -601,6 +602,25 @@ def _coerce_context_counting_mode(value: object, default: str = "char") -> str:
     return default
 
 
+def _coerce_context_scene_summary_mode(value: object, default: str = "rolling") -> str:
+    normalized = str(value or default).strip().lower()
+    if normalized in {"rolling", "cumulative_light", "cumulative_llm"}:
+        return normalized
+    return default
+
+
+def _coerce_unit_float(value: object, default: float) -> float:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(parsed):
+        return default
+    return max(0.0, min(parsed, 1.0))
+
+
 def _default_bridge_root_raw() -> str:
     if sys.platform.startswith("win"):
         return "%LOCALAPPDATA%/N.E.K.O/galgame-bridge"
@@ -649,6 +669,17 @@ def build_config(raw_config: dict[str, Any]) -> GalgameConfig:
     bridge_root_raw = str(bridge_root_value).strip() if bridge_root_value is not None else ""
     if not bridge_root_raw:
         bridge_root_raw = _default_bridge_root_raw()
+    context_explain_min_lines = _coerce_int(
+        llm_obj.get("context_explain_min_lines"), 4, minimum=1
+    )
+    context_explain_max_lines = _coerce_int(
+        llm_obj.get("context_explain_max_lines"), 16, minimum=1
+    )
+    if context_explain_min_lines > context_explain_max_lines:
+        context_explain_min_lines, context_explain_max_lines = (
+            context_explain_max_lines,
+            context_explain_min_lines,
+        )
 
     return GalgameConfig(
         bridge_root=expand_bridge_root(bridge_root_raw),
@@ -699,6 +730,9 @@ def build_config(raw_config: dict[str, Any]) -> GalgameConfig:
         llm_request_cache_ttl_seconds=_coerce_float(
             llm_obj.get("llm_request_cache_ttl_seconds"), 2.0, minimum=0.0
         ),
+        llm_explain_cache_ttl_seconds=_coerce_float(
+            llm_obj.get("llm_explain_cache_ttl_seconds"), 8.0, minimum=0.0
+        ),
         llm_target_entry_ref=str(llm_obj.get("target_entry_ref") or "").strip(),
         llm_vision_enabled=_coerce_bool(llm_obj.get("vision_enabled"), False),
         llm_vision_max_image_px=_coerce_int(
@@ -706,6 +740,15 @@ def build_config(raw_config: dict[str, Any]) -> GalgameConfig:
         ),
         llm_scene_summary_cache_ttl_seconds=_coerce_float(
             llm_obj.get("llm_scene_summary_cache_ttl_seconds"), 10.0, minimum=0.0
+        ),
+        llm_choice_cache_ttl_seconds=_coerce_float(
+            llm_obj.get("llm_choice_cache_ttl_seconds"), 4.0, minimum=0.0
+        ),
+        llm_near_match_cache_enabled=_coerce_bool(
+            llm_obj.get("llm_near_match_cache_enabled"), False
+        ),
+        llm_near_match_cache_ttl_seconds=_coerce_float(
+            llm_obj.get("llm_near_match_cache_ttl_seconds"), 15.0, minimum=0.0
         ),
         llm_temperature_agent_reply=_coerce_float(
             llm_obj.get("temperature_agent_reply"), 0.2, minimum=0.0
@@ -727,6 +770,38 @@ def build_config(raw_config: dict[str, Any]) -> GalgameConfig:
         ),
         context_counting_mode=_coerce_context_counting_mode(
             llm_obj.get("context_counting_mode")
+        ),
+        context_semantic_compression=_coerce_bool(
+            llm_obj.get("context_semantic_compression"), False
+        ),
+        context_explain_min_lines=context_explain_min_lines,
+        context_explain_max_lines=context_explain_max_lines,
+        context_window_target_tokens=_coerce_int(
+            llm_obj.get("context_window_target_tokens"), 800, minimum=1
+        ),
+        context_scene_summary_mode=_coerce_context_scene_summary_mode(
+            llm_obj.get("context_scene_summary_mode")
+        ),
+        context_cumulative_llm_trigger_lines=_coerce_int(
+            llm_obj.get("context_cumulative_llm_trigger_lines"), 30, minimum=1
+        ),
+        context_line_importance_enabled=_coerce_bool(
+            llm_obj.get("context_line_importance_enabled"), False
+        ),
+        context_persist_enabled=_coerce_bool(
+            llm_obj.get("context_persist_enabled"), False
+        ),
+        context_persist_max_age_seconds=_coerce_float(
+            llm_obj.get("context_persist_max_age_seconds"), 3600.0, minimum=0.0
+        ),
+        context_persist_require_game_id=_coerce_bool(
+            llm_obj.get("context_persist_require_game_id"), True
+        ),
+        llm_repeat_detection_enabled=_coerce_bool(
+            llm_obj.get("llm_repeat_detection_enabled"), False
+        ),
+        llm_repeat_similarity_threshold=_coerce_unit_float(
+            llm_obj.get("llm_repeat_similarity_threshold"), 0.85
         ),
         reader_mode=_coerce_reader_mode(galgame_obj.get("reader_mode")),
         memory_reader_enabled=_coerce_bool(
@@ -2971,10 +3046,17 @@ def build_local_scene_summary(
     return summary
 
 
-def build_explain_context(local_state: dict[str, Any], *, line_id: str) -> dict[str, Any]:
+def build_explain_context(
+    local_state: dict[str, Any],
+    *,
+    line_id: str,
+    config: GalgameLLMConfig | None = None,
+) -> dict[str, Any]:
     from .context_builder import build_explain_context as _build_explain_context
 
-    return _build_explain_context(local_state, line_id=line_id)
+    if config is None:
+        return _build_explain_context(local_state, line_id=line_id)
+    return _build_explain_context(local_state, line_id=line_id, config=config)
 
 
 def build_summarize_context(
@@ -2982,20 +3064,34 @@ def build_summarize_context(
     *,
     scene_id: str,
     merge_from_scene_ids: list[str] | None = None,
+    config: GalgameLLMConfig | None = None,
 ) -> dict[str, Any]:
     from .context_builder import build_summarize_context as _build_summarize_context
 
+    if config is None:
+        return _build_summarize_context(
+            local_state,
+            scene_id=scene_id,
+            merge_from_scene_ids=merge_from_scene_ids,
+        )
     return _build_summarize_context(
         local_state,
         scene_id=scene_id,
         merge_from_scene_ids=merge_from_scene_ids,
+        config=config,
     )
 
 
-def build_suggest_context(local_state: dict[str, Any]) -> dict[str, Any]:
+def build_suggest_context(
+    local_state: dict[str, Any],
+    *,
+    config: GalgameLLMConfig | None = None,
+) -> dict[str, Any]:
     from .context_builder import build_suggest_context as _build_suggest_context
 
-    return _build_suggest_context(local_state)
+    if config is None:
+        return _build_suggest_context(local_state)
+    return _build_suggest_context(local_state, config=config)
 
 
 def build_explain_degraded_result(

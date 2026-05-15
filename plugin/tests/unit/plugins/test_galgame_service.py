@@ -167,17 +167,98 @@ def test_build_config_reads_context_optimization_fields() -> None:
                 "context_max_tokens": 4096,
                 "context_metrics_enabled": True,
                 "context_counting_mode": "token",
+                "context_semantic_compression": True,
+                "context_explain_min_lines": 3,
+                "context_explain_max_lines": 9,
+                "context_window_target_tokens": 512,
+                "context_scene_summary_mode": "cumulative_light",
+                "context_cumulative_llm_trigger_lines": 12,
+                "context_line_importance_enabled": True,
+                "llm_explain_cache_ttl_seconds": 7,
+                "llm_choice_cache_ttl_seconds": 5,
+                "llm_near_match_cache_enabled": True,
+                "llm_near_match_cache_ttl_seconds": 11,
+                "context_persist_enabled": True,
+                "context_persist_max_age_seconds": 120,
+                "context_persist_require_game_id": False,
+                "llm_repeat_detection_enabled": True,
+                "llm_repeat_similarity_threshold": 0.9,
             }
         }
     )
     invalid = galgame_service.build_config(
-        {"llm": {"context_counting_mode": "words"}}
+        {
+            "llm": {
+                "context_counting_mode": "words",
+                "context_scene_summary_mode": "invalid",
+                "llm_repeat_similarity_threshold": 3,
+            }
+        }
+    )
+    low_threshold = galgame_service.build_config(
+        {"llm": {"llm_repeat_similarity_threshold": -1}}
     )
 
     assert cfg.context_max_tokens == 4096
     assert cfg.context_metrics_enabled is True
     assert cfg.context_counting_mode == "token"
+    assert cfg.context_semantic_compression is True
+    assert cfg.context_explain_min_lines == 3
+    assert cfg.context_explain_max_lines == 9
+    assert cfg.context_window_target_tokens == 512
+    assert cfg.context_scene_summary_mode == "cumulative_light"
+    assert cfg.context_cumulative_llm_trigger_lines == 12
+    assert cfg.context_line_importance_enabled is True
+    assert cfg.llm_explain_cache_ttl_seconds == 7
+    assert cfg.llm_choice_cache_ttl_seconds == 5
+    assert cfg.llm_near_match_cache_enabled is True
+    assert cfg.llm_near_match_cache_ttl_seconds == 11
+    assert cfg.context_persist_enabled is True
+    assert cfg.context_persist_max_age_seconds == 120
+    assert cfg.context_persist_require_game_id is False
+    assert cfg.llm_repeat_detection_enabled is True
+    assert cfg.llm_repeat_similarity_threshold == 0.9
     assert invalid.context_counting_mode == "char"
+    assert invalid.context_scene_summary_mode == "rolling"
+    assert invalid.llm_repeat_similarity_threshold == 1.0
+    assert low_threshold.llm_repeat_similarity_threshold == 0.0
+
+
+def test_build_config_defaults_phase2_context_fields() -> None:
+    cfg = galgame_service.build_config({})
+
+    assert cfg.context_semantic_compression is False
+    assert cfg.context_explain_min_lines == 4
+    assert cfg.context_explain_max_lines == 16
+    assert cfg.context_window_target_tokens == 800
+    assert cfg.context_scene_summary_mode == "rolling"
+    assert cfg.context_cumulative_llm_trigger_lines == 30
+    assert cfg.context_line_importance_enabled is False
+    assert cfg.llm_explain_cache_ttl_seconds == 8.0
+    assert cfg.llm_choice_cache_ttl_seconds == 4.0
+    assert cfg.llm_near_match_cache_enabled is False
+    assert cfg.llm_near_match_cache_ttl_seconds == 15.0
+    assert cfg.context_persist_enabled is False
+    assert cfg.context_persist_max_age_seconds == 3600.0
+    assert cfg.context_persist_require_game_id is True
+    assert cfg.llm_repeat_detection_enabled is False
+    assert cfg.llm_repeat_similarity_threshold == 0.85
+
+
+def test_build_config_normalizes_invalid_phase2_context_fields() -> None:
+    cfg = galgame_service.build_config(
+        {
+            "llm": {
+                "context_explain_min_lines": 12,
+                "context_explain_max_lines": 5,
+                "context_window_target_tokens": 0,
+            }
+        }
+    )
+
+    assert cfg.context_explain_min_lines == 5
+    assert cfg.context_explain_max_lines == 12
+    assert cfg.context_window_target_tokens == 800
 
 
 def test_context_builder_forwards_context_builders_without_behavior_change(
@@ -195,20 +276,26 @@ def test_context_builder_forwards_context_builders_without_behavior_change(
         *,
         scene_id: str,
         merge_from_scene_ids: list[str] | None = None,
+        config: object | None = None,
     ) -> dict[str, str]:
-        calls["summarize"] = (received_local_state, scene_id, merge_from_scene_ids)
+        calls["summarize"] = (received_local_state, scene_id, merge_from_scene_ids, config)
         return summarize_result
 
     def fake_build_explain_context(
         received_local_state: dict[str, object],
         *,
         line_id: str,
+        config: object | None = None,
     ) -> dict[str, str]:
-        calls["explain"] = (received_local_state, line_id)
+        calls["explain"] = (received_local_state, line_id, config)
         return explain_result
 
-    def fake_build_suggest_context(received_local_state: dict[str, object]) -> dict[str, str]:
-        calls["suggest"] = (received_local_state,)
+    def fake_build_suggest_context(
+        received_local_state: dict[str, object],
+        *,
+        config: object | None = None,
+    ) -> dict[str, str]:
+        calls["suggest"] = (received_local_state, config)
         return suggest_result
 
     monkeypatch.setattr(
@@ -235,9 +322,9 @@ def test_context_builder_forwards_context_builders_without_behavior_change(
     assert build_explain_context(local_state, line_id="ocr:line-stable") is explain_result
     assert build_suggest_context(local_state) is suggest_result
     assert calls == {
-        "summarize": (local_state, "ocr:game:scene-0001", merge_from_scene_ids),
-        "explain": (local_state, "ocr:line-stable"),
-        "suggest": (local_state,),
+        "summarize": (local_state, "ocr:game:scene-0001", merge_from_scene_ids, None),
+        "explain": (local_state, "ocr:line-stable", None),
+        "suggest": (local_state, None),
     }
 
 

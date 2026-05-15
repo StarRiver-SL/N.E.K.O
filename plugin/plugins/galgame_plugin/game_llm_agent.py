@@ -8,6 +8,11 @@ import time
 from typing import Any, Callable
 
 from .host_agent_adapter import HostAgentAdapter, HostAgentError
+from .context_builder import (
+    _compute_dynamic_line_limit,
+    _context_window_bounds,
+    _recency_ordered_context_lines,
+)
 from .local_input_actuator import (
     VIRTUAL_MOUSE_DIALOGUE_CANDIDATES,
     perform_local_input_actuation,
@@ -35,6 +40,7 @@ from .models import (
     OCR_CAPTURE_PROFILE_STAGE_TRANSITION,
     OCR_TRIGGER_MODE_AFTER_ADVANCE,
     OCR_TRIGGER_MODE_INTERVAL,
+    GalgameLLMConfig,
     SharedStatePayload,
     json_copy,
     sanitize_snapshot_state,
@@ -600,7 +606,7 @@ class GameLLMAgent:
         logger,
         llm_gateway,
         host_adapter: HostAgentAdapter,
-        config: Any | None = None,
+        config: GalgameLLMConfig | None = None,
         local_input_actuator: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
         | None = None,
     ) -> None:
@@ -608,6 +614,7 @@ class GameLLMAgent:
         self._logger = logger
         self._llm_gateway = llm_gateway
         self._host_adapter = host_adapter
+        self._context_config = config
         self._scene_summary_push_line_interval = max(
             1,
             int(
@@ -1233,7 +1240,10 @@ class GameLLMAgent:
                             self._planning_choice_signature = choice_signature
                             await self._run_choice_planning_inline(
                                 shared,
-                                context=build_suggest_context(shared),
+                                context=build_suggest_context(
+                                    shared,
+                                    config=self._context_config,
+                                ),
                                 now=now,
                             )
                             self._last_status = self._compute_status(shared)
@@ -3666,7 +3676,11 @@ class GameLLMAgent:
 
         if scene_changed:
             previous_scene_id = str(self._scene_state.get("scene_id") or "")
-            summary_context = build_summarize_context(shared, scene_id=scene_id)
+            summary_context = build_summarize_context(
+                shared,
+                scene_id=scene_id,
+                config=self._context_config,
+            )
             summary_seed = build_local_scene_summary(
                 scene_id=scene_id,
                 route_id=route_id,
@@ -3949,7 +3963,11 @@ class GameLLMAgent:
         if not trigger or trigger == "scene_changed" or not self._should_push_scene(shared):
             return
         route_id = str(boundary.get("route_id") or snapshot.get("route_id") or "")
-        context = build_summarize_context(shared, scene_id=scene_id)
+        context = build_summarize_context(
+            shared,
+            scene_id=scene_id,
+            config=self._context_config,
+        )
         self._schedule_scene_summary_task(
             shared=shared,
             session_id=session_id,
@@ -4454,7 +4472,11 @@ class GameLLMAgent:
         if scene_changed:
             if not allow_agent_side_effects:
                 return
-            context = build_summarize_context(shared, scene_id=current_scene_id)
+            context = build_summarize_context(
+                shared,
+                scene_id=current_scene_id,
+                config=self._context_config,
+            )
             summary = self._build_local_scene_summary_from_context(
                 context,
                 scene_id=current_scene_id,
@@ -5047,7 +5069,10 @@ class GameLLMAgent:
                 else None
             )
             context = build_summarize_context(
-                shared, scene_id=scene_id, merge_from_scene_ids=merge_ids
+                shared,
+                scene_id=scene_id,
+                merge_from_scene_ids=merge_ids,
+                config=self._context_config,
             )
             if scene_id == self._pending_merge_primary:
                 self._pending_merge_scene_ids = None
@@ -5154,7 +5179,11 @@ class GameLLMAgent:
         route_id: str,
         snapshot: dict[str, Any],
     ) -> tuple[str, dict[str, Any], dict[str, Any]]:
-        context = build_summarize_context(shared, scene_id=scene_id)
+        context = build_summarize_context(
+            shared,
+            scene_id=scene_id,
+            config=self._context_config,
+        )
         # Fallback: if current scene has no lines yet, include previous scene
         # if the scene change was recent (within 10 seconds)
         if not list(context.get("stable_lines") or []):
@@ -5165,6 +5194,7 @@ class GameLLMAgent:
                     shared,
                     scene_id=scene_id,
                     merge_from_scene_ids=[previous_scene_id],
+                    config=self._context_config,
                 )
         summary, meta = await self._summarize_scene_context_for_cat(
             context,
@@ -5466,10 +5496,64 @@ class GameLLMAgent:
     def _build_agent_reply_context(self, shared: dict[str, Any], *, prompt: str) -> dict[str, Any]:
         snapshot = sanitize_snapshot_state(shared.get("latest_snapshot", {}))
         status = self._compute_status(shared)
-        stable_lines = list(shared.get("history_lines") or [])[-8:]
-        observed_lines = list(shared.get("history_observed_lines") or [])[-8:]
-        recent_choices = list(shared.get("history_choices") or [])[-8:]
-        recent_lines = [*stable_lines[-4:], *observed_lines[-4:]]
+        history_lines = list(shared.get("history_lines") or [])
+        history_observed_lines = list(shared.get("history_observed_lines") or [])
+        min_limit, max_limit, target_tokens = _context_window_bounds(
+            self._context_config,
+            max_floor=16,
+        )
+        line_limit = _compute_dynamic_line_limit(
+            _recency_ordered_context_lines(history_lines, history_observed_lines),
+            min_limit=min_limit,
+            max_limit=max_limit,
+            target_tokens=target_tokens,
+        )
+        history_choices = list(shared.get("history_choices") or [])
+        if line_limit > 0:
+            tagged_stable = [
+                {**dict(item), "_reply_context_source": "stable"}
+                for item in history_lines
+                if isinstance(item, dict)
+            ]
+            tagged_observed = [
+                {**dict(item), "_reply_context_source": "observed"}
+                for item in history_observed_lines
+                if isinstance(item, dict)
+            ]
+            merged_recent = _recency_ordered_context_lines(
+                tagged_stable,
+                tagged_observed,
+            )[-line_limit:]
+            stable_lines = [
+                {key: value for key, value in item.items() if key != "_reply_context_source"}
+                for item in merged_recent
+                if item.get("_reply_context_source") == "stable"
+            ]
+            observed_lines = [
+                {key: value for key, value in item.items() if key != "_reply_context_source"}
+                for item in merged_recent
+                if item.get("_reply_context_source") == "observed"
+            ]
+            recent_lines = [
+                {key: value for key, value in item.items() if key != "_reply_context_source"}
+                for item in merged_recent
+            ]
+            recent_line_ids = {
+                str(item.get("line_id") or "")
+                for item in recent_lines
+                if str(item.get("line_id") or "")
+            }
+            recent_choices = [
+                dict(item)
+                for item in history_choices
+                if isinstance(item, dict)
+                and str(item.get("line_id") or "") in recent_line_ids
+            ][-line_limit:]
+        else:
+            stable_lines = []
+            observed_lines = []
+            recent_choices = []
+            recent_lines = []
         effective_line = resolve_effective_current_line(shared) or {}
         latest_line = ""
         if effective_line.get("text"):
