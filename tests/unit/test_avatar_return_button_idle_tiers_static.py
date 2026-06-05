@@ -252,14 +252,26 @@ def test_desktop_return_ball_drag_stops_native_drag_without_waiting_for_frame():
 def test_desktop_return_ball_drag_lifecycle_waits_for_restored_viewport_before_reveal():
     source = APP_UI_PATH.read_text(encoding="utf-8")
 
-    assert ": 600" in source
+    assert "MULTI_WINDOW_RETURN_BALL_DRAG_SHRINK_FALLBACK_MS = 220" in source
+    assert "MULTI_WINDOW_RETURN_BALL_DRAG_RESTORE_FALLBACK_MS = 600" in source
+    assert "MULTI_WINDOW_RETURN_BALL_REVEAL_FALLBACK_MS = 600" in source
+    assert "continueOnFallback" in source
+    assert "waitForViewportSize timed out; continuing best-effort cleanup" in source
     assert "keeping return-ball hidden until viewport is restored" in source
     assert "waitForViewportSize hard timeout; continuing best-effort cleanup" in source
     assert "clearMultiWindowReturnBallDeferredWork(state)" in source
     assert "state.viewportWaitFallbackTimer = setTimeout(pollViewportRestore, 50)" in source
-    assert "runWhenStable({ timedOut: true })" not in source
+    assert "runWhenStable({ timedOut: true })" in source
     assert "function revealReturnBallDragWindow()" in source
     assert "window.nekoPetDrag.reveal" in source
+    assert "function dispatchReturnBallRevealFailed(reason, error)" in source
+    assert "'return-ball-reveal-failed'" in source
+    assert "'neko:return-ball-reveal-failed'" in source
+    assert "Promise.resolve(revealResult)" in source
+    assert "dispatchReturnBallRevealFailed('reveal-timeout')" in source
+    assert "await revealReturnBallDragWindow()" not in source
+    assert "function isNativeReturnBallDragDisabled()" in source
+    assert "isNativeReturnBallDragDisabled() || !window.nekoPetDrag" in source
     assert "const dragStarted = window.nekoPetDrag.start(screenX, screenY)" in source
     assert "if (dragStarted === false)" in source
 
@@ -270,6 +282,13 @@ def test_desktop_return_ball_drag_lifecycle_waits_for_restored_viewport_before_r
 
     assert begin_index < native_start_index < dispatch_start_index < drag_style_index
 
+    finish_index = source.index("async function finishDrag(screenX, screenY)")
+    no_move_start = source.index("if (!state.hasMoved) {", finish_index)
+    no_move_end = source.index("const finalBounds = await resolveFinalWindowBounds", no_move_start)
+    no_move_block = source[no_move_start:no_move_end]
+
+    assert no_move_block.index("revealReturnBallDragWindow();") < no_move_block.index("dispatchReturnBallClick();")
+
 
 def test_return_button_drag_has_single_owner_per_runtime_path():
     avatar_source = AVATAR_UI_BUTTONS_PATH.read_text(encoding="utf-8")
@@ -277,7 +296,8 @@ def test_return_button_drag_has_single_owner_per_runtime_path():
     vrm_source = VRM_UI_BUTTONS_PATH.read_text(encoding="utf-8")
     mmd_source = MMD_UI_BUTTONS_PATH.read_text(encoding="utf-8")
 
-    assert "if (!window.__NEKO_MULTI_WINDOW__)" in avatar_source
+    assert "function _isNekoNativeReturnBallDragDisabled()" in avatar_source
+    assert "if (!window.__NEKO_MULTI_WINDOW__ || _isNekoNativeReturnBallDragDisabled())" in avatar_source
     assert "this._setupReturnButtonDrag(returnButtonContainer)" in avatar_source
     assert "Live2DManager.prototype.setupReturnButtonContainerDrag = function(container)" in live2d_source
     assert "this.setupReturnButtonContainerDrag(returnButtonContainer)" not in live2d_source
@@ -516,7 +536,7 @@ def test_cat1_walk_to_minimized_chat_contract_is_present():
     assert "'return-ball-drag-end'" in app_ui_source
     assert "movedDistancePx: movedDistancePx" in app_ui_source
     assert "this._setupReturnButtonDrag(returnButtonContainer)" in source
-    assert "if (!window.__NEKO_MULTI_WINDOW__)" in source
+    assert "if (!window.__NEKO_MULTI_WINDOW__ || _isNekoNativeReturnBallDragDisabled())" in source
 
 
 def test_cat1_walk_is_blocked_while_return_ball_drag_is_active_or_pending():
