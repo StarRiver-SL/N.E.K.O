@@ -63,6 +63,19 @@ describe('App', () => {
     }));
   };
 
+  const mockMobileMatchMedia = (mobile = true) => {
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: mobile && query === '(max-width: 820px)',
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+  };
+
   const setupAvatarDropBounds = () => {
     const live2dContainer = document.createElement('div');
     live2dContainer.id = 'live2d-container';
@@ -4299,6 +4312,7 @@ describe('App', () => {
     expect(onComposerSubmit).not.toHaveBeenCalled();
     expect(fan).not.toBeNull();
     expect(fan).toHaveAttribute('data-compact-input-tool-fan-open', 'true');
+    expect(fan).toHaveAttribute('data-compact-tool-wheel-layout', 'default');
     expect(fan).toHaveAttribute('data-compact-geometry-owner', 'surface');
     expect(fan).toHaveAttribute('data-compact-geometry-item', 'toolFan');
     expect(fan?.parentElement).toBe(shell);
@@ -4315,6 +4329,164 @@ describe('App', () => {
     expect(fan?.querySelectorAll('.compact-input-tool-item[data-compact-tool-wheel-slot="hidden-backward"]')).toHaveLength(1);
     expect(fan?.querySelectorAll('[tabindex="0"]')).toHaveLength(5);
     expect(container.querySelectorAll('.send-button-circle')).toHaveLength(1);
+  });
+
+  it('keeps the default compact tool wheel layout on mobile when the original arc fits', () => {
+    const originalMatchMedia = window.matchMedia;
+    const originalInnerWidth = window.innerWidth;
+    const originalInnerHeight = window.innerHeight;
+    mockMobileMatchMedia();
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 844 });
+
+    try {
+      const { container } = render(<App chatSurfaceMode="compact" compactChatState="input" />);
+      const fan = container.querySelector('.compact-input-tool-fan') as HTMLDivElement;
+      vi.spyOn(fan, 'getBoundingClientRect').mockReturnValue({
+        left: 10,
+        top: 10,
+        right: 242,
+        bottom: 242,
+        width: 232,
+        height: 232,
+        x: 10,
+        y: 10,
+        toJSON: () => ({}),
+      });
+
+      const actionButton = container.querySelector('.compact-input-tool-toggle') as HTMLButtonElement;
+      expect(actionButton).not.toBeNull();
+      fireEvent.click(actionButton);
+
+      expect(fan).toHaveAttribute('data-compact-input-tool-fan-open', 'true');
+      expect(fan).toHaveAttribute('data-compact-tool-wheel-layout', 'default');
+    } finally {
+      window.matchMedia = originalMatchMedia;
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth });
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalInnerHeight });
+    }
+  });
+
+  it('uses viewport-fit compact tool wheel layout on mobile when the original arc would clip', () => {
+    const originalMatchMedia = window.matchMedia;
+    const originalInnerWidth = window.innerWidth;
+    const originalInnerHeight = window.innerHeight;
+    mockMobileMatchMedia();
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 844 });
+
+    try {
+      const { container } = render(<App chatSurfaceMode="compact" compactChatState="input" />);
+      const fan = container.querySelector('.compact-input-tool-fan') as HTMLDivElement;
+      vi.spyOn(fan, 'getBoundingClientRect').mockReturnValue({
+        left: 220,
+        top: 580,
+        right: 452,
+        bottom: 812,
+        width: 232,
+        height: 232,
+        x: 220,
+        y: 580,
+        toJSON: () => ({}),
+      });
+
+      const actionButton = container.querySelector('.compact-input-tool-toggle') as HTMLButtonElement;
+      expect(actionButton).not.toBeNull();
+      fireEvent.click(actionButton);
+
+      expect(fan).toHaveAttribute('data-compact-input-tool-fan-open', 'true');
+      expect(fan).toHaveAttribute('data-compact-tool-wheel-layout', 'viewport-fit');
+    } finally {
+      window.matchMedia = originalMatchMedia;
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth });
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalInnerHeight });
+    }
+  });
+
+  it('uses the visual viewport when checking compact tool wheel clipping on mobile', () => {
+    const originalMatchMedia = window.matchMedia;
+    const originalInnerWidth = window.innerWidth;
+    const originalInnerHeight = window.innerHeight;
+    const originalVisualViewport = window.visualViewport;
+    mockMobileMatchMedia();
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 844 });
+    Object.defineProperty(window, 'visualViewport', {
+      configurable: true,
+      value: {
+        width: 390,
+        height: 180,
+        offsetLeft: 0,
+        offsetTop: 0,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      },
+    });
+
+    try {
+      const { container } = render(<App chatSurfaceMode="compact" compactChatState="input" />);
+      const fan = container.querySelector('.compact-input-tool-fan') as HTMLDivElement;
+      vi.spyOn(fan, 'getBoundingClientRect').mockReturnValue({
+        left: 10,
+        top: 10,
+        right: 242,
+        bottom: 242,
+        width: 232,
+        height: 232,
+        x: 10,
+        y: 10,
+        toJSON: () => ({}),
+      });
+
+      const actionButton = container.querySelector('.compact-input-tool-toggle') as HTMLButtonElement;
+      expect(actionButton).not.toBeNull();
+      fireEvent.click(actionButton);
+
+      expect(fan).toHaveAttribute('data-compact-input-tool-fan-open', 'true');
+      expect(fan).toHaveAttribute('data-compact-tool-wheel-layout', 'viewport-fit');
+    } finally {
+      window.matchMedia = originalMatchMedia;
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth });
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalInnerHeight });
+      Object.defineProperty(window, 'visualViewport', { configurable: true, value: originalVisualViewport });
+    }
+  });
+
+  it('keeps the default compact tool wheel layout when viewport-fit would still clip at the top edge', () => {
+    const originalMatchMedia = window.matchMedia;
+    const originalInnerWidth = window.innerWidth;
+    const originalInnerHeight = window.innerHeight;
+    mockMobileMatchMedia();
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 844 });
+
+    try {
+      const { container } = render(<App chatSurfaceMode="compact" compactChatState="input" />);
+      const fan = container.querySelector('.compact-input-tool-fan') as HTMLDivElement;
+      vi.spyOn(fan, 'getBoundingClientRect').mockReturnValue({
+        left: 10,
+        top: -90,
+        right: 242,
+        bottom: 142,
+        width: 232,
+        height: 232,
+        x: 10,
+        y: -90,
+        toJSON: () => ({}),
+      });
+
+      const actionButton = container.querySelector('.compact-input-tool-toggle') as HTMLButtonElement;
+      expect(actionButton).not.toBeNull();
+      fireEvent.click(actionButton);
+
+      expect(fan).toHaveAttribute('data-compact-input-tool-fan-open', 'true');
+      expect(fan).toHaveAttribute('data-compact-tool-wheel-layout', 'default');
+    } finally {
+      window.matchMedia = originalMatchMedia;
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth });
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalInnerHeight });
+    }
   });
 
   it('anchors compact avatar tool bubbles to the fan origin instead of the rotating tool item', async () => {
