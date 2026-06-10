@@ -3114,11 +3114,13 @@ function _stepNekoIdleCat1PairMove(button, startedAt, timestamp) {
     }
     const elapsedMs = Math.max(0, timestamp - startedAt);
     const progress = plan.durationMs > 0 ? Math.min(1, elapsedMs / plan.durationMs) : 1;
-    _applyNekoIdleCat1PairMovePlan(plan, progress);
     if (progress >= 1) {
+        // 末帧只由 _finishNekoIdleCat1PairMove 强制同步一次原生 bounds；
+        // 若先在此处 apply(progress=1) 再 finish，会触发两次 force dispatch（绕过节流/去重）的重复同步。
         _finishNekoIdleCat1PairMove(button);
         return;
     }
+    _applyNekoIdleCat1PairMovePlan(plan, progress);
     state.pairMoveFrame = window.requestAnimationFrame((nextTimestamp) => {
         _stepNekoIdleCat1PairMove(button, startedAt, nextTimestamp);
     });
