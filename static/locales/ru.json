@@ -2206,6 +2206,7 @@
         "sessionFailed": "Ошибка запуска сессии"
     },
     "buttons": {
+        "thoughtBubblePop": "Лопнуть облачко мысли",
         "voiceControl": "Голосовое управление",
         "screenShare": "Демонстрация экрана",
         "agentTools": "Лапка Неко",

@@ -2206,6 +2206,7 @@
         "sessionFailed": "セッションの開始に失敗しました"
     },
     "buttons": {
+        "thoughtBubblePop": "ふきだしを弾く",
         "voiceControl": "音声制御",
         "screenShare": "画面共有",
         "agentTools": "ネコクロー",

@@ -2206,6 +2206,7 @@
         "sessionFailed": "Session failed to start"
     },
     "buttons": {
+        "thoughtBubblePop": "Pop thought bubble",
         "voiceControl": "Voice Control",
         "screenShare": "Screen Share",
         "agentTools": "NekoClaw",
