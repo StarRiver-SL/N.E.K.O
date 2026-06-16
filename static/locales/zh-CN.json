@@ -1023,7 +1023,8 @@
             "claude": "Claude（Anthropic，国内无法使用）",
             "grok": "Grok（xAI）",
             "openrouter": "OpenRouter（模型聚合，国内无法使用）",
-            "vllm_omni": "vLLM-Omni（TTS）"
+            "vllm_omni": "vLLM-Omni（TTS）",
+            "gptsovits": "GPT-SoVITS（自部署）"
         },
         "coreApiAutoFillHint": "Key从API管理簿自动填充，也可在此直接输入",
         "assistApiSelectLabel": "辅助API服务商",
@@ -1038,6 +1039,12 @@
         "keyAutoFilledFromKeyBook": "Key从API管理簿自动填充，请在管理簿中配置",
         "goToKeyBook": "前往管理簿",
         "providerLabel": "服务商",
+        "sourcePreset": "预制",
+        "sourceClone": "克隆",
+        "sourceDesign": "描述生成",
+        "providerLocal": "本地 CosyVoice",
+        "providerFree": "免费",
+        "providerUnknown": "其他",
         "providerSelectPlaceholder": "请选择服务商",
         "noOptionsAvailable": "暂无可选项",
         "customModelProviderFollowCore": "跟随核心API",

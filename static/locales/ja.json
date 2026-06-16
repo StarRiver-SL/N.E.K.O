@@ -1023,7 +1023,8 @@
             "claude": "Claude（Anthropic）",
             "grok": "Grok（xAI）",
             "openrouter": "OpenRouter（モデルアグリゲーター）",
-            "vllm_omni": "vLLM-Omni（TTS）"
+            "vllm_omni": "vLLM-Omni（TTS）",
+            "gptsovits": "GPT-SoVITS（セルフホスト）"
         },
         "coreApiAutoFillHint": "API管理簿からキーが自動入力されます。直接入力も可能です",
         "assistApiSelectLabel": "アシストAPIプロバイダー",
@@ -1038,6 +1039,12 @@
         "keyAutoFilledFromKeyBook": "APIキーブックから自動入力されます。キーブックで設定してください。",
         "goToKeyBook": "キーブックへ",
         "providerLabel": "プロバイダー",
+        "sourcePreset": "プリセット",
+        "sourceClone": "クローン",
+        "sourceDesign": "生成",
+        "providerLocal": "ローカル CosyVoice",
+        "providerFree": "無料",
+        "providerUnknown": "その他",
         "providerSelectPlaceholder": "プロバイダーを選択",
         "noOptionsAvailable": "利用可能な項目はありません",
         "customModelProviderFollowCore": "コアAPIに従う",

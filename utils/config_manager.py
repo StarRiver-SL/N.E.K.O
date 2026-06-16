@@ -3188,6 +3188,45 @@ class ConfigManager:
 
         return False
 
+    def normalize_voice_id_to_config(self, voice_id):
+        """Resolve a flat / prefixed ``voice_id`` into a structured ``VoiceConfig``.
+
+        A bare id (no ``gsv:`` / ``eleven:`` prefix) needs runtime context to decide
+        its ``source`` / ``provider``; this reuses the same resolution chain as
+        :meth:`validate_voice_id` (vLLM selected / a clone in the current API's
+        voice_storage / a saveable native voice / a free preset) and feeds that
+        context to the pure :func:`utils.voice_config.normalize_voice_id`, so the
+        migration stays faithful and unambiguous.
+
+        An unresolvable bare id is carried through unchanged in ``ref`` (never
+        dropped); callers treat it as "leave the value as-is".
+        """
+        from utils.voice_config import normalize_voice_id
+        from utils.native_voice_registry import (
+            get_active_realtime_native_provider,
+            is_saveable_native_voice,
+        )
+        from utils.api_config_loader import get_free_voices
+
+        _voices_cache = {}
+
+        def _clone_lookup(ref):
+            if 'voices' not in _voices_cache:
+                _voices_cache['voices'] = self.get_voices_for_current_api()
+            vdata = _voices_cache['voices'].get(ref)
+            if isinstance(vdata, dict):
+                return str(vdata.get('provider') or '')
+            return None
+
+        return normalize_voice_id(
+            voice_id,
+            vllm_selected=self._is_vllm_omni_tts_selected(self.get_core_config()),
+            clone_provider_lookup=_clone_lookup,
+            is_native=lambda ref: is_saveable_native_voice(self, ref),
+            native_provider=get_active_realtime_native_provider(self) or '',
+            free_voice_ids=set(get_free_voices().values()),
+        )
+
     def cleanup_invalid_voice_ids(self):
         """Clean up invalid voice_ids in characters.json.
         
