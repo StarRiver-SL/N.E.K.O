@@ -39,6 +39,8 @@ from typing import Any, Awaitable, Callable, Optional
 _REQUEST_ID_UNSET: Any = object()
 _MAGIC_COMMAND_IMAGE_DROP_REQUEST_MAX = 64
 _VOICE_PROACTIVE_ACK_GRACE_S = 0.05
+_TEXT_SESSION_INPUT_TYPES = frozenset({"text", "avatar_drop_image", "user_image"})
+_IMAGE_INPUT_TYPES = frozenset({"screen", "camera", "avatar_drop_image", "user_image"})
 from datetime import datetime
 from websockets import exceptions as web_exceptions
 from fastapi import WebSocket, WebSocketDisconnect
@@ -2141,6 +2143,15 @@ class LLMSessionManager:
             # swallowed inside the dispatcher.
             dispatch_user_utterance(bucket, event)
 
+    def _clean_frontend_memory_text(self, value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]+", "", value)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if not cleaned:
+            return ""
+        return cleaned[:500]
+
     async def _broadcast_voice_transcript_observed(self, transcript: str) -> None:
         """Best-effort fan-out of voice transcripts to plugins.
 
@@ -2412,6 +2423,7 @@ class LLMSessionManager:
             buffer twice)
         """
         transcript_text = transcript.strip()
+        record_transcript_text = transcript_text
         voice_rms_recorded = False
 
         # 更新用户活动时间戳（用于主动搭话检测）。先捕获「转写到达时刻」局部变量，
@@ -2468,14 +2480,14 @@ class LLMSessionManager:
             # 维持 voice_engaged 状态。
             self._activity_tracker.on_voice_rms()
 
-        if is_voice_source and transcript_text:
-            self._fire_task(self._broadcast_voice_transcript_observed(transcript_text))
+        if is_voice_source and record_transcript_text:
+            self._fire_task(self._broadcast_voice_transcript_observed(record_transcript_text))
 
         if is_voice_source:
             # 仅非空转录才算"用户消息"：on_user_message 会清掉 unfinished_thread、
             # bump _conv_seq（让 open_threads 缓存失效）、把文本进 buffer 给
             # emotion-tier LLM 用——空 transcript 这些副作用都不该触发。
-            if transcript_text:
+            if record_transcript_text:
                 self._note_user_turn(text=transcript)
                 # 真实用户语音消息（已过 echo 抑制 + 非空）才刷「真消息」时间戳，
                 # 给 mini-game 邀请隐式 dismiss 用，避免回声/空噪声误判用户已回应。
@@ -2512,11 +2524,11 @@ class LLMSessionManager:
             # at `_process_stream_data_internal` has already recorded the
             # user message. We still need the queue/cache plumbing below
             # to work normally, so just bypass the tracker block.
-            if transcript_text:
+            if record_transcript_text:
                 self._session_turn_count += 1
 
         # 推送到同步消息队列
-        user_message = {"input_type": "transcript", "data": transcript.strip()}
+        user_message = {"input_type": "transcript", "data": record_transcript_text}
         if not is_voice_source and self._active_text_request_id:
             user_message["request_id"] = self._active_text_request_id
         self.sync_message_queue.put({"type": "user", "data": user_message})
@@ -2531,7 +2543,7 @@ class LLMSessionManager:
         )
         logger.info(
             "[%s] voice user_transcript session=%s ws_connected=%s len=%d",
-            self.lanlan_name, type(self.session).__name__, _ws_connected_dbg, len(transcript.strip()),
+            self.lanlan_name, type(self.session).__name__, _ws_connected_dbg, len(record_transcript_text),
         )
         if isinstance(self.session, OmniRealtimeClient):
             if self.websocket and hasattr(self.websocket, 'client_state') and self.websocket.client_state == self.websocket.client_state.CONNECTED:
@@ -2549,9 +2561,9 @@ class LLMSessionManager:
             if not hasattr(self, 'message_cache_for_new_session'):
                 self.message_cache_for_new_session = []
             if len(self.message_cache_for_new_session) == 0 or self.message_cache_for_new_session[-1]['role'] == self.lanlan_name:
-                self.message_cache_for_new_session.append({"role": self.master_name, "text": transcript.strip()})
+                self.message_cache_for_new_session.append({"role": self.master_name, "text": record_transcript_text})
             elif self.message_cache_for_new_session[-1]['role'] == self.master_name:
-                self.message_cache_for_new_session[-1]['text'] += transcript.strip()
+                self.message_cache_for_new_session[-1]['text'] += record_transcript_text
         # 注意: 这里不能修改 current_speech_id.
         # speech_id 仅应在“模型新回复开始”时更新 (handle_new_message / 文本模式 stream 入口),
         # 否则会导致前端把同一轮 AI 语音误判为新轮次, 出现首包被重置/吞掉的问题.
@@ -3891,7 +3903,7 @@ class LLMSessionManager:
                         if msg_input_type == "audio":
                             await self._enqueue_audio_stream_data(message)
                         else:
-                            if is_voice_session and msg_input_type == "text":
+                            if is_voice_session and msg_input_type in _TEXT_SESSION_INPUT_TYPES:
                                 dropped_text_for_voice += 1
                                 continue
                             await self._process_stream_data_internal(message)
@@ -7505,7 +7517,6 @@ class LLMSessionManager:
 
     async def _stream_data_now(self, message: dict):
         input_type = message.get("input_type")
-        
         # 检查session是否就绪
         async with self.input_cache_lock:
             if not self.session_ready:
@@ -7533,7 +7544,7 @@ class LLMSessionManager:
                     return
                 logger.info(f"Session未就绪且不存在，根据输入类型 {input_type} 自动创建 session")
                 # 根据输入类型确定模式
-                mode = 'text' if input_type == 'text' else 'audio'
+                mode = 'text' if input_type in _TEXT_SESSION_INPUT_TYPES else 'audio'
                 await self.start_session(self.websocket, new=False, input_mode=mode)
 
                 # 检查启动是否成功
@@ -7548,7 +7559,6 @@ class LLMSessionManager:
         """Internal method: the actual stream_data processing logic"""
         data = message.get("data")
         input_type = message.get("input_type")
-        
         # 检查session是否发生致命错误（如1011错误、Response timeout）
         if self.session and isinstance(self.session, OmniRealtimeClient):
             if hasattr(self.session, '_fatal_error_occurred') and self.session._fatal_error_occurred:
@@ -7591,7 +7601,7 @@ class LLMSessionManager:
                 return
             
             # 根据输入类型确定模式
-            mode = 'text' if input_type == 'text' else 'audio'
+            mode = 'text' if input_type in _TEXT_SESSION_INPUT_TYPES else 'audio'
             await self.start_session(self.websocket, new=False, input_mode=mode)
             
             # 检查启动是否成功
@@ -7648,6 +7658,8 @@ class LLMSessionManager:
                 
                 # 文本模式：直接发送文本
                 if isinstance(data, str):
+                    memory_text = self._clean_frontend_memory_text(message.get("memory_text"))
+                    record_data = memory_text or data
                     # 更新用户活动时间戳（与 handle_input_transcript / _record_external_user_input
                     # 对偶）。idle reset loop 依赖该字段判断静默时长，文本路径不补的话
                     # 纯文本会话永远满足"静默 ≥ 30 min"被误重置。
@@ -7657,7 +7669,7 @@ class LLMSessionManager:
                     # 推进 mini-game 邀请隐式 dismiss 判定（CodeRabbit）。注意
                     # last_user_activity_time 仍无条件刷（服务 idle reset，语义是
                     # 「有没有发请求」，与「是不是真消息」不同）。
-                    if data.strip():
+                    if record_data.strip():
                         self.last_user_message_time = time.time()
 
                     # 更新字数限制（可能用户在对话期间修改了设置）
@@ -7689,7 +7701,7 @@ class LLMSessionManager:
                     # 里挂——后者也被 proactive abort 流程调用做清理（见
                     # main_routers/system_router.py），那不算用户活动。
                     # text 进 buffer 给 emotion-tier 用。
-                    self._note_user_turn(text=data if isinstance(data, str) else None)
+                    self._note_user_turn(text=record_data)
                     # Telemetry：D1 漏斗——本进程首条用户消息（lazy import 防循环）。
                     try:
                         from utils.token_tracker import TokenTracker as _TT
@@ -7706,7 +7718,7 @@ class LLMSessionManager:
                     # bucket。语音路径在 handle_input_transcript 里发布，这里只覆盖
                     # 文本路径，避免与语音入口重复发布。
                     self._publish_user_utterance_to_plugin_bus(
-                        data if isinstance(data, str) else None,
+                        record_data,
                         is_voice_source=False,
                     )
 
@@ -7716,7 +7728,7 @@ class LLMSessionManager:
                     # （handle_input_transcript）共用同一方法，逻辑见
                     # _dispatch_mini_game_invite_keyword。
                     await self._dispatch_mini_game_invite_keyword(
-                        data if isinstance(data, str) else '',
+                        record_data,
                     )
 
                     openclaw_magic_command = self._normalize_explicit_openclaw_magic_command(data)
@@ -7771,10 +7783,17 @@ class LLMSessionManager:
                             _agent_cb_ctx = ""
 
                     self._active_text_request_id = message.get("request_id")
-                    await self.session.stream_text(
-                        data,
-                        system_prefix=_agent_cb_ctx or None,
-                    )
+                    input_transcript_callback = None
+                    if memory_text:
+                        async def input_transcript_callback(_transcript: str, *, _memory_text: str = memory_text) -> None:
+                            await self.handle_input_transcript(_memory_text, is_voice_source=False)
+
+                    stream_text_kwargs = {"system_prefix": _agent_cb_ctx or None}
+                    if input_transcript_callback:
+                        stream_text_kwargs["input_transcript_callback"] = input_transcript_callback
+                    if memory_text:
+                        stream_text_kwargs["history_replacement_text"] = memory_text
+                    await self.session.stream_text(data, **stream_text_kwargs)
                 else:
                     logger.error(f"💥 Stream: Invalid text data type: {type(data)}")
                 return
@@ -7914,18 +7933,18 @@ class LLMSessionManager:
                         self.last_audio_send_error_time = current_time
                     return
 
-            elif input_type in ['screen', 'camera']:
+            elif input_type in _IMAGE_INPUT_TYPES:
                 try:
                     if self._should_drop_magic_command_image(message.get("request_id")):
                         return
-                    # 使用统一的屏幕分享工具处理数据（只验证，不缩放）
+                    # 使用统一的图像工具处理数据（只验证，不缩放）
                     image_b64 = await process_screen_data(data)
 
                     if image_b64:
                         # 叠加 Avatar 文字注解（仅当本条消息携带了位置元数据时）
                         # 不回退到 self._avatar_position：前端未附带位置说明该截图不应叠加
                         # （如窗口截图、手机相机等场景）
-                        av_pos = message.get('avatar_position')
+                        av_pos = message.get('avatar_position') if input_type in {"screen", "camera"} else None
                         if av_pos and isinstance(av_pos, dict):
                             try:
                                 image_b64 = await asyncio.to_thread(
@@ -7941,9 +7960,16 @@ class LLMSessionManager:
                         if isinstance(self.session, OmniOfflineClient):
                             # 只添加到待发送队列，等待与文本一起发送
                             await self.session.stream_image(image_b64)
+                            image_data = (
+                                ""
+                                if input_type in {"avatar_drop_image", "user_image"}
+                                else f"data:image/jpeg;base64,{image_b64}"
+                            )
                             image_message = {
                                 "input_type": input_type,
-                                "data": f"data:image/jpeg;base64,{image_b64}",
+                                "data": image_data,
+                                "has_image": True,
+                                "mime_type": "image/jpeg",
                             }
                             if message.get("request_id"):
                                 image_message["request_id"] = message.get("request_id")
@@ -7962,12 +7988,12 @@ class LLMSessionManager:
                             # 语音模式直接发送图片
                             await self.session.stream_image(image_b64)
                     else:
-                        logger.error("💥 Stream: 屏幕数据验证失败")
+                        logger.error("💥 Stream: 图像数据验证失败")
                         return
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    logger.error(f"💥 Stream: Error processing screen data: {e}")
+                    logger.error(f"💥 Stream: Error processing image data: {e}")
                     return
 
         except web_exceptions.ConnectionClosedError as e:
