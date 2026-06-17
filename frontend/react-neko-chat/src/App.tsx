@@ -1427,9 +1427,9 @@ function CompactChatApp({
   onChoiceSelect,
   avatarToolMenuOpenRequest = null,
   compactToolFanOpenRequest = null,
-  compactHistoryOpenRequest = null,
   compactToolWheelRotateRequest = null,
   compactToolWheelIndexRequest = null,
+  compactHistoryOpenRequest = null,
   onCompactChatStateChange,
   onCompactMinimizeRequest,
   rollbackDraft,
@@ -1541,6 +1541,7 @@ function CompactChatApp({
   const [compactSpeechVisibleLength, setCompactSpeechVisibleLength] = useState(0);
   const [compactSpeechFallbackRevealActive, setCompactSpeechFallbackRevealActive] = useState(false);
   const [guideChatButtonsLocked, setGuideChatButtonsLocked] = useState(isGuideChatButtonLockActive);
+  const compactCapsuleEntryLocked = compactTextEntryLocked || guideChatButtonsLocked;
   const [speechPlaybackState, setSpeechPlaybackState] = useState<SpeechPlaybackState | null>(null);
   const [compactCaptionState, setCompactCaptionState] = useState<CompactCaptionState | null>(null);
   const [compactAssistantStreamingGap, setCompactAssistantStreamingGap] = useState<{
@@ -1593,9 +1594,9 @@ function CompactChatApp({
   const lastToolCursorResetKeyRef = useRef('');
   const lastAvatarToolMenuOpenRequestIdRef = useRef('');
   const lastCompactToolFanOpenRequestIdRef = useRef('');
-  const lastCompactHistoryOpenRequestIdRef = useRef('');
   const lastCompactToolWheelRotateRequestIdRef = useRef('');
   const lastCompactToolWheelIndexRequestIdRef = useRef('');
+  const lastCompactHistoryOpenRequestIdRef = useRef('');
   const compactInputHasPayload = draft.trim().length > 0 || composerAttachments.length > 0;
   const canSubmit = !compactTextEntryLocked && compactInputHasPayload;
   const clearActiveCursorToolSelection = useCallback(() => {
@@ -1966,6 +1967,18 @@ function CompactChatApp({
       compactExportHistoryUnmountTimerRef.current = null;
     }, COMPACT_EXPORT_HISTORY_VISIBILITY_ANIMATION_MS);
   }, [clearCompactExportHistoryUnmountTimer, messages]);
+
+  useEffect(() => {
+    const request = compactHistoryOpenRequest;
+    if (!request || !request.id || request.id === lastCompactHistoryOpenRequestIdRef.current) return;
+    lastCompactHistoryOpenRequestIdRef.current = request.id;
+    if (request.open) {
+      openCompactExportHistory();
+      return;
+    }
+    closeCompactExportHistory({ persist: false });
+  }, [closeCompactExportHistory, compactHistoryOpenRequest, openCompactExportHistory]);
+
   useEffect(() => () => {
     clearCompactExportHistoryUnmountTimer();
   }, [clearCompactExportHistoryUnmountTimer]);
@@ -6581,11 +6594,10 @@ function CompactChatApp({
                         <button
                           className="compact-chat-capsule-button"
                           type="button"
-                          disabled={compactTextEntryLocked}
+                          disabled={compactCapsuleEntryLocked}
                           onClick={() => {
                             if (composerHidden) return;
-                            if (compactTextEntryLocked) return;
-                            if (isGuideChatButtonLockActive()) return;
+                            if (compactCapsuleEntryLocked) return;
                             requestCompactChatState('input');
                           }}
                         >

@@ -64,6 +64,7 @@
     var ELECTRON_CHAT_MINIMIZED_STATE_HEARTBEAT_MS = 1000;
     var savedExpandedShellPosition = null; // last known full-surface desktop position
     var lastRestorableChatSurfaceMode = 'compact';
+    var tutorialChatRequestSeq = 0;
     var _sortKeySeq = 0; // monotonically increasing sortKey counter
     var COMPACT_CHAT_STATES = ['default', 'options', 'input'];
     // The active compact↔minimized cycle. `full` is intentionally NOT here: it is
@@ -2508,7 +2509,8 @@
             onGalgameOptionSelect: handleGalgameOptionSelect,
             onChoiceSelect: handleChoiceSelect,
             onCompactChatStateChange: handleCompactChatStateChange,
-            onCompactMinimizeRequest: handleCompactMinimizeRequest
+            onCompactMinimizeRequest: handleCompactMinimizeRequest,
+            compactHistoryOpenRequest: state.viewProps.compactHistoryOpenRequest || null
         });
     }
 
@@ -4057,14 +4059,22 @@
             return;
         }
         state.homeTutorialInteractionLocked = next;
+        var compactStateReset = false;
         if (next && getCurrentCompactChatState() === 'input') {
             resetCompactChatState();
+            compactStateReset = true;
         }
         state.viewProps = Object.assign({}, ensureViewProps(), {
             composerDisabled: next,
             compactChatState: getCurrentCompactChatState()
         });
         renderWindow();
+        if (compactStateReset) {
+            syncChatSurfaceModeUI();
+            dispatchHostEvent('compact-chat-state-change', {
+                state: getCurrentCompactChatState()
+            });
+        }
     }
 
     function setHomeTutorialInputLocked(locked, reason) {
@@ -4076,11 +4086,22 @@
             resetCompactChatState();
         }
         state.homeTutorialInputLocked = next;
+        var compactStateReset = false;
+        if (next && getCurrentCompactChatState() === 'input') {
+            resetCompactChatState();
+            compactStateReset = true;
+        }
         state.viewProps = Object.assign({}, ensureViewProps(), {
             compactChatState: getCurrentCompactChatState(),
             compactInputLocked: next
         });
         renderWindow();
+        if (compactStateReset) {
+            syncChatSurfaceModeUI();
+            dispatchHostEvent('compact-chat-state-change', {
+                state: getCurrentCompactChatState()
+            });
+        }
     }
 
     function setAvatarToolMenuOpen(open, reason) {
@@ -6284,22 +6305,25 @@
         window.addEventListener('neko:tutorial-completed', function (event) {
             var detail = event && event.detail ? event.detail : {};
             if (detail.page !== 'home') return;
-            setGalgameModeTemporarilyDisabled(false);
             setHomeTutorialInteractionLocked(false, 'tutorial-completed');
+            setHomeTutorialInputLocked(false, 'tutorial-completed');
+            setGalgameModeTemporarilyDisabled(false);
         });
 
         window.addEventListener('neko:tutorial-skipped', function (event) {
             var detail = event && event.detail ? event.detail : {};
             if (detail.page !== 'home') return;
-            setGalgameModeTemporarilyDisabled(false);
             setHomeTutorialInteractionLocked(false, 'tutorial-skipped');
+            setHomeTutorialInputLocked(false, 'tutorial-skipped');
+            setGalgameModeTemporarilyDisabled(false);
         });
 
         window.addEventListener('neko:tutorial-ended-without-completion', function (event) {
             var detail = event && event.detail ? event.detail : {};
             if (detail.page !== 'home') return;
-            setGalgameModeTemporarilyDisabled(false);
             setHomeTutorialInteractionLocked(false, 'tutorial-ended-without-completion');
+            setHomeTutorialInputLocked(false, 'tutorial-ended-without-completion');
+            setGalgameModeTemporarilyDisabled(false);
         });
 
         // Refresh option list whenever an assistant turn finishes streaming.

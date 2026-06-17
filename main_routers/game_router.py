@@ -84,6 +84,7 @@ from config.prompts.prompts_game_route import (
     get_game_recent_history_message_labels,
 )
 from .shared_state import get_config_manager, get_session_manager
+from .system_router import _validate_local_mutation_request
 from main_logic.mirror_meta import (
     MIRROR_USER_TEXT_INPUT_TYPE,
     MIRROR_USER_VOICE_TRANSCRIPT_INPUT_TYPE,
@@ -6718,6 +6719,10 @@ async def game_route_voice_transcript(game_type: str, request: Request):
         return {"ok": False, "reason": "missing_lanlan_name"}
     _absorb_request_language(data, lanlan_name)
 
+    mgr = get_session_manager().get(lanlan_name)
+    if not mgr:
+        return {"ok": False, "reason": "no_session_manager", "lanlan_name": lanlan_name}
+
     session_id = str(data.get("session_id") or "")
     state = _get_active_game_route_state(lanlan_name, game_type)
     if not state:
@@ -6949,6 +6954,10 @@ async def game_project_context(game_type: str, request: Request):
     if not isinstance(data, dict):
         return {"ok": False, "reason": "invalid_body"}
 
+    validation_error = _validate_local_mutation_request(request, payload=data)
+    if validation_error is not None:
+        return validation_error
+
     role = str(data.get("role") or "").strip()
     text = str(data.get("text") or "").strip()
     if role not in {"assistant", "user"}:
@@ -7003,10 +7012,8 @@ async def game_project_context(game_type: str, request: Request):
             return {"ok": False, "reason": "context_method_unavailable", "lanlan_name": lanlan_name}
     except Exception as exc:
         logger.warning(
-            "🎮 新用户破冰上下文追加失败: lanlan=%s role=%s session=%s err=%s",
+            "new_user_icebreaker context append failed for %s: %s",
             lanlan_name,
-            role,
-            data.get("session_id") or "",
             exc,
             exc_info=True,
         )
@@ -7024,7 +7031,7 @@ async def game_project_context(game_type: str, request: Request):
         "method": "project_session_history",
         "lanlan_name": lanlan_name,
         "game_type": game_type,
-        "session_id": str(data.get("session_id") or ""),
+        "session_id": session_id,
     }
 
 

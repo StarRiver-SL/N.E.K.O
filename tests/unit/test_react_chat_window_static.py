@@ -6,7 +6,6 @@ APP_REACT_CHAT_WINDOW_PATH = Path(__file__).resolve().parents[2] / "static" / "a
 APP_BUTTONS_PATH = Path(__file__).resolve().parents[2] / "static" / "app-buttons.js"
 APP_CHAT_EXPORT_PATH = Path(__file__).resolve().parents[2] / "static" / "app-chat-export.js"
 APP_INTERPAGE_PATH = Path(__file__).resolve().parents[2] / "static" / "app-interpage.js"
-ICEBREAKER_SCRIPT_PATH = Path(__file__).resolve().parents[2] / "static" / "tutorial" / "icebreaker" / "new-user-icebreaker.js"
 AVATAR_UI_POPUP_PATH = Path(__file__).resolve().parents[2] / "static" / "avatar-ui-popup.js"
 MUSIC_UI_PATH = Path(__file__).resolve().parents[2] / "static" / "music_ui.js"
 MUSIC_UI_CSS_PATH = Path(__file__).resolve().parents[2] / "static" / "css" / "music_ui.css"
@@ -15,6 +14,9 @@ STATIC_DARK_MODE_CSS_PATH = Path(__file__).resolve().parents[2] / "static" / "cs
 STATIC_INDEX_JS_PATH = Path(__file__).resolve().parents[2] / "static" / "js" / "index.js"
 REACT_CHAT_STYLES_PATH = Path(__file__).resolve().parents[2] / "frontend" / "react-neko-chat" / "src" / "styles.css"
 REACT_CHAT_APP_PATH = Path(__file__).resolve().parents[2] / "frontend" / "react-neko-chat" / "src" / "App.tsx"
+REACT_CHAT_MESSAGE_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[2] / "frontend" / "react-neko-chat" / "src" / "message-schema.ts"
+)
 REACT_CHAT_IIFE_PATH = Path(__file__).resolve().parents[2] / "static" / "react" / "neko-chat" / "neko-chat-window.iife.js"
 CHAT_TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "templates" / "chat.html"
 INDEX_TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "templates" / "index.html"
@@ -425,8 +427,8 @@ def test_home_tutorial_input_lock_blocks_compact_capsule_input_state():
     )[0]
     assert "compactInputLocked: next" in input_lock_block
     assert "setHomeTutorialInteractionLocked(next" not in input_lock_block
-    assert "disabled={compactTextEntryLocked}" in capsule_block
-    assert "if (compactTextEntryLocked) return;" in capsule_block
+    assert "disabled={compactCapsuleEntryLocked}" in capsule_block
+    assert "if (compactCapsuleEntryLocked) return;" in capsule_block
 
 
 def test_home_tutorial_events_lock_chat_buttons_and_collapse_compact_input():
@@ -471,6 +473,8 @@ def test_home_tutorial_events_lock_chat_buttons_and_collapse_compact_input():
 def test_home_tutorial_host_wires_avatar_tool_requests():
     script = APP_REACT_CHAT_WINDOW_PATH.read_text(encoding="utf-8")
     interpage_source = APP_INTERPAGE_PATH.read_text(encoding="utf-8")
+    app_source = REACT_CHAT_APP_PATH.read_text(encoding="utf-8")
+    schema_source = REACT_CHAT_MESSAGE_SCHEMA_PATH.read_text(encoding="utf-8")
 
     assert "setHomeTutorialInputLocked: setHomeTutorialInputLocked" in script
     assert "setAvatarToolMenuOpen: setAvatarToolMenuOpen" in script
@@ -483,42 +487,30 @@ def test_home_tutorial_host_wires_avatar_tool_requests():
     assert "compactHistoryOpenRequest" in script
     assert "compactToolWheelRotateRequest" in script
     assert "compactToolWheelIndexRequest" in script
+    assert "setTutorialChatRequest('compactHistoryOpenRequest'" in script
 
     assert "case 'yui_guide_set_chat_input_locked':" in interpage_source
+    assert "case 'yui_guide_set_compact_history_open':" in interpage_source
     assert "case 'yui_guide_set_avatar_tool_menu_open':" in interpage_source
     assert "case 'yui_guide_set_compact_tool_fan_open':" in interpage_source
     assert "case 'yui_guide_rotate_compact_tool_wheel':" in interpage_source
     assert "case 'yui_guide_set_compact_tool_wheel_index':" in interpage_source
+    assert "queueYuiGuideChatHostCommand" in interpage_source
+    assert "flushPendingYuiGuideChatHostCommands" in interpage_source
     assert "host.setHomeTutorialInputLocked(locked === true" in interpage_source
+    assert "host.setCompactHistoryOpen(open === true" in interpage_source
     assert "host.setAvatarToolMenuOpen(open === true" in interpage_source
     assert "host.rotateCompactToolWheel(payload && payload.direction" in interpage_source
 
-
-def test_new_user_icebreaker_choice_prompt_wires_chat_host_and_external_chat():
-    script = APP_REACT_CHAT_WINDOW_PATH.read_text(encoding="utf-8")
-    interpage_source = APP_INTERPAGE_PATH.read_text(encoding="utf-8")
-    icebreaker_source = ICEBREAKER_SCRIPT_PATH.read_text(encoding="utf-8")
-
-    assert "function setIcebreakerChoicePrompt(payload)" in script
-    assert "function clearIcebreakerChoicePrompt(sessionId)" in script
-    assert "source: 'new_user_icebreaker'" in script
-    assert "setIcebreakerChoicePrompt: setIcebreakerChoicePrompt" in script
-    assert "clearIcebreakerChoicePrompt: clearIcebreakerChoicePrompt" in script
-    assert "if (source === 'new_user_icebreaker')" in script
-    assert "action: 'icebreaker_choice_selected'" in script
-
-    assert "case 'icebreaker_append_chat_message':" in interpage_source
-    assert "case 'icebreaker_set_choice_prompt':" in interpage_source
-    assert "case 'icebreaker_clear_choice_prompt':" in interpage_source
-    assert "case 'icebreaker_choice_selected':" in interpage_source
-    assert "lanlan_name: resolveLanlanName()" in icebreaker_source
-    assert "if (!isYuiGuideCommandForCurrentLanlan(event.data)) break;" in interpage_source
-    assert "host.setIcebreakerChoicePrompt(prompt)" in interpage_source
-    assert "host.clearIcebreakerChoicePrompt(sessionId)" in interpage_source
-    assert "neko:icebreaker-choice-selected" in interpage_source
+    assert "compactHistoryOpenRequest = null" in app_source
+    assert "const lastCompactHistoryOpenRequestIdRef = useRef('');" in app_source
+    assert "const request = compactHistoryOpenRequest;" in app_source
+    assert "openCompactExportHistory();" in app_source
+    assert "closeCompactExportHistory();" in app_source
+    assert "compactHistoryOpenRequest: compactHistoryOpenRequestSchema.optional()" in schema_source
 
 
-def test_home_template_loads_delivered_daily_guide_scripts():
+def test_day6_home_template_only_loads_delivered_daily_guide_scripts():
     source = INDEX_TEMPLATE_PATH.read_text(encoding="utf-8")
 
     for guide_script in [
@@ -528,11 +520,15 @@ def test_home_template_loads_delivered_daily_guide_scripts():
         "tutorial/yui-guide/days/day4-companion-guide.js",
         "tutorial/yui-guide/days/day5-personalization-guide.js",
         "tutorial/yui-guide/days/day6-agent-guide.js",
-        "tutorial/yui-guide/days/day7-graduation-guide.js",
-        "tutorial/icebreaker/new-user-icebreaker.js",
     ]:
         assert f'<script src="/static/{guide_script}' in source
         assert (Path(__file__).resolve().parents[2] / "static" / guide_script).exists()
+
+    for future_script in [
+        "tutorial/yui-guide/days/day7-graduation-guide.js",
+        "tutorial/icebreaker/new-user-icebreaker.js",
+    ]:
+        assert f'<script src="/static/{future_script}' not in source
 
 
 def test_idle_cat1_compact_mirror_ignores_pet_window_local_events():
@@ -1055,17 +1051,24 @@ def test_externalized_chat_input_spotlight_uses_global_overlay_only():
 
 def test_yui_guide_spotlight_state_messages_bypass_cross_channel_dedup():
     script = (Path(__file__).resolve().parents[2] / "static" / "app-interpage.js").read_text(encoding="utf-8")
-
-    bypass_block = script.split("function shouldBypassYuiGuideMessageDedup(action)", 1)[1].split(
+    bypass_block = script.split("function shouldBypassYuiGuideMessageDedup(action, message)", 1)[1].split(
         "function isMainUIHiddenByModelManager()",
         1,
     )[0]
 
-    assert "action === 'yui_guide_set_chat_spotlight'" in bypass_block
+    assert "function isDuplicateMessage(action, timestamp)" in script
     assert "action === 'yui_guide_set_chat_cursor'" in bypass_block
-    assert "action === 'yui_guide_rotate_compact_tool_wheel'" not in bypass_block
-    assert "!shouldBypassYuiGuideMessageDedup(message.action)" in script
-    assert "!shouldBypassYuiGuideMessageDedup(event.data.action)" in script
+    assert "action === 'yui_guide_drag_chat_cursor'" in bypass_block
+    assert "action === 'yui_guide_arc_chat_cursor'" in bypass_block
+    assert "action === 'yui_guide_rotate_compact_tool_wheel'" in bypass_block
+    assert "action === 'yui_guide_set_chat_spotlight'" in bypass_block
+    assert "action === 'yui_guide_set_chat_buttons_disabled'" in bypass_block
+    assert "!shouldBypassYuiGuideMessageDedup(event.data.action, event.data)" in script
+    assert "function isYuiGuideCommandForCurrentLanlan(data)" in script
+    assert "if (!isYuiGuideCommandForCurrentLanlan(event.data)) break;" in script
+    assert "case 'yui_guide_set_chat_spotlight':" in script
+    assert "case 'yui_guide_rotate_compact_tool_wheel':" in script
+    assert "queueYuiGuideChatHostCommand" in script
 
 
 def test_yui_guide_external_compact_history_open_is_bridged_to_react_host():
@@ -1121,13 +1124,6 @@ def test_new_user_icebreaker_choice_listener_posts_context():
     )[0]
 
     assert "const option = detail && detail.option" in choice_block
-    assert "if (session.choiceInFlight)" in choice_block
-    assert choice_block.index("if (sessionId && sessionId !== session.id)") < choice_block.index(
-        "session.choiceInFlight = true;"
-    )
-    assert "try {" in choice_block
-    assert "finally {" in choice_block
-    assert "session.choiceInFlight = false;" in choice_block
     assert "const choice = String((detail && detail.choice) || option.choice || '')" in choice_block
     assert "const label = String((detail && detail.label) || option.label || '')" in choice_block
     assert "const contextSynced = await postContext('user', label || choice, session.id);" in choice_block
