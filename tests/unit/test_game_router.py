@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sqlite3
 from unittest.mock import AsyncMock
 
@@ -92,6 +93,33 @@ def test_parse_control_instructions_extracts_json_line():
     assert result == {
         "line": "这球我拿下了喵",
         "control": {"mood": "happy", "difficulty": "lv2"},
+    }
+
+
+@pytest.mark.unit
+def test_parse_control_instructions_sanitizes_visible_line_leaks():
+    result = game_router._parse_control_instructions(
+        'glog_0040: 哼，那我认真一点咯。 (mood=angry, difficulty=lv2)\n'
+        'reason="balance tuning"\n'
+        '{"mood":"angry","difficulty":"lv2","reason":"压一压节奏"}'
+    )
+
+    assert result == {
+        "line": "哼，那我认真一点咯。",
+        "control": {"mood": "angry", "difficulty": "lv2", "reason": "压一压节奏"},
+    }
+
+
+@pytest.mark.unit
+def test_parse_control_instructions_drops_internal_advice_lines_from_visible_line():
+    result = game_router._parse_control_instructions(
+        '根据系统建议降低难度。\n'
+        '看你追得这么急，我就稍微认真一点点。'
+    )
+
+    assert result == {
+        "line": "看你追得这么急，我就稍微认真一点点。",
+        "control": {},
     }
 
 
@@ -2031,7 +2059,7 @@ def test_memory_highlight_source_explains_game_event_text_is_not_user_speech():
     })
 
     assert "只有“玩家：...”行是玩家亲口说的话" in source
-    assert "事件原文是游戏模块/猫娘气泡或事件标签，不要归因给玩家" in source
+    assert "“事件原文”是游戏模块/猫娘气泡或事件标签，不要归因给玩家" in source
     assert "游戏事件 goal-conceded（玩家进球 / 猫娘丢球）" in source
     assert "固定顺序是玩家在前、当前角色在后" in source
     assert "官方结果，来源优先级为 finalScore / last_state.score" in source
@@ -2063,12 +2091,34 @@ def test_memory_highlight_source_keeps_role_markers_aligned_in_english(monkeypat
         ],
     })
 
-    assert 'literal marker "玩家："' in source
-    assert '"事件原文" inside "游戏事件" lines' in source
-    assert "玩家：I almost caught up" in source
-    assert "游戏事件 goal-conceded" in source
-    assert "Player:" not in source
-    assert "Game event" not in source
+    assert 'literal marker "Player:"' in source
+    assert '"event text" inside "Game event" lines' in source
+    assert "Player: I almost caught up" in source
+    assert "Game event goal-conceded" in source
+
+
+@pytest.mark.unit
+def test_archive_memory_fallback_highlights_use_requested_locale(monkeypatch):
+    monkeypatch.setattr(game_router, "_archive_prompt_language", lambda _archive: "en")
+
+    highlights = game_router._fallback_game_archive_memory_highlights({
+        "game_type": "soccer",
+        "session_id": "match_1",
+        "lanlan_name": "Lan",
+        "last_state": {"score": {"player": 1, "ai": 2}},
+        "soccer_game_memory_enabled": True,
+        "soccer_game_memory_player_interaction_enabled": True,
+        "last_full_dialogues": [
+            {"type": "user", "text": "That was close"},
+            {"type": "assistant", "line": "Almost."},
+        ],
+        "key_events": [],
+    })
+
+    assert highlights["important_records"] == [
+        'The player last said "That was close", and you replied "Almost.".'
+    ]
+    assert "玩家最后" not in highlights["important_records"][0]
 
 
 @pytest.mark.unit
@@ -2181,6 +2231,127 @@ def test_game_route_helper_llm_info_does_not_mix_partial_summary_config(monkeypa
 
 
 @pytest.mark.unit
+def test_build_game_llm_visible_event_filters_soccer_internal_fields():
+    event = {
+        "kind": "mailbox-batch",
+        "lanlan_name": "Lan",
+        "soccerGameMemoryEnabled": True,
+        "soccer_game_memory_enabled": True,
+        "soccerGameMemoryPlayerInteractionEnabled": True,
+        "soccer_game_memory_player_interaction_enabled": True,
+        "soccerGameMemoryEventReplyEnabled": True,
+        "soccer_game_memory_event_reply_enabled": True,
+        "soccerGameMemoryArchiveEnabled": True,
+        "soccer_game_memory_archive_enabled": True,
+        "soccerGameMemoryPostgameContextEnabled": True,
+        "soccer_game_memory_postgame_context_enabled": True,
+        "gameMemoryEnabled": True,
+        "game_memory_enabled": True,
+        "gameMemoryPlayerInteractionEnabled": True,
+        "game_memory_player_interaction_enabled": True,
+        "gameMemoryEventReplyEnabled": True,
+        "game_memory_event_reply_enabled": True,
+        "balanceHint": {"message": "keep this pending judgment"},
+        "angerPressureCap": {"message": "keep this pending judgment", "reason": "internal-ish but undecided"},
+        "currentState": {
+            "round": 12,
+            "score": {"player": 1, "ai": 3},
+            "aiFreezeSec": 0.2,
+            "playerKickStartleWindowSec": 0.5,
+            "playerKickWallBounceForStartle": True,
+            "startle": {"directCdSec": 1},
+            "startleDirectCdSec": 1,
+            "startleGrazeCdSec": 2,
+            "startleMutualLockSec": 3,
+            "zoneoutCooldownSec": 4,
+            "ballGhost": True,
+        },
+        "pendingItems": [{
+            "kind": "goal-scored",
+            "priority": 8,
+            "source": "voice_input_gate",
+            "builtinFallback": "备用台词",
+            "snapshot": {
+                "round": 11,
+                "score": {"player": 1, "ai": 2},
+                "aiFreezeSec": 0.1,
+                "ballGhost": False,
+            },
+        }],
+    }
+
+    visible = game_router._build_game_llm_visible_event("soccer", event)
+
+    assert "lanlan_name" not in visible
+    assert "soccerGameMemoryEnabled" not in visible
+    assert "soccer_game_memory_enabled" not in visible
+    assert "gameMemoryEnabled" not in visible
+    assert "game_memory_enabled" not in visible
+    assert visible["balanceHint"] == event["balanceHint"]
+    assert visible["angerPressureCap"] == event["angerPressureCap"]
+    assert visible["pendingItems"][0]["priority"] == 8
+    assert visible["pendingItems"][0]["source"] == "voice_input_gate"
+    assert visible["pendingItems"][0]["builtinFallback"] == "备用台词"
+    for state in (visible["currentState"], visible["pendingItems"][0]["snapshot"]):
+        assert "aiFreezeSec" not in state
+        assert "playerKickStartleWindowSec" not in state
+        assert "playerKickWallBounceForStartle" not in state
+        assert "startle" not in state
+        assert "zoneoutCooldownSec" not in state
+        assert "ballGhost" not in state
+    assert event["currentState"]["aiFreezeSec"] == 0.2
+    assert event["pendingItems"][0]["snapshot"]["ballGhost"] is False
+
+
+@pytest.mark.unit
+def test_build_game_llm_visible_event_filters_basketball_memory_flags():
+    event = {
+        "kind": "shot-made",
+        "basketballGameMemoryEnabled": True,
+        "basketball_game_memory_enabled": True,
+        "basketballGameMemoryPlayerInteractionEnabled": True,
+        "basketball_game_memory_player_interaction_enabled": True,
+        "basketballGameMemoryEventReplyEnabled": True,
+        "basketball_game_memory_event_reply_enabled": True,
+        "basketballGameMemoryArchiveEnabled": True,
+        "basketball_game_memory_archive_enabled": True,
+        "basketballGameMemoryPostgameContextEnabled": True,
+        "basketball_game_memory_postgame_context_enabled": True,
+        "currentState": {"mode": "shooter", "streak": 3},
+    }
+
+    visible = game_router._build_game_llm_visible_event("basketball", event)
+
+    assert visible == {
+        "kind": "shot-made",
+        "currentState": {"mode": "shooter", "streak": 3},
+    }
+    assert event["basketballGameMemoryEnabled"] is True
+
+
+@pytest.mark.unit
+def test_postgame_context_snapshot_excludes_recent_dialogues(monkeypatch):
+    state = {
+        "preGameContext": {"story": "opening"},
+        "game_context_summary": "summary",
+        "game_context_signals": {},
+        "game_context_organizer": {},
+        "game_dialog_log": [],
+    }
+    game_router._append_game_dialog(state, {
+        "type": "game_event",
+        "kind": "goal-scored",
+        "text": "scored",
+        "result_line": "Nice.",
+    })
+
+    snapshot = game_router._build_postgame_context_snapshot(state)
+
+    assert snapshot["game_context"]["summary"] == "summary"
+    assert snapshot["game_context"]["recent_dialogues"] == []
+
+
+@pytest.mark.unit
 @pytest.mark.asyncio
 async def test_game_chat_event_user_turn_keeps_watermark(monkeypatch):
     class FakeSession:
@@ -2218,6 +2389,100 @@ async def test_game_chat_event_user_turn_keeps_watermark(monkeypatch):
     assert result["line"] == ""
     assert "======以上为游戏事件输入======" in fake_session.last_text
     assert '"kind": "goal-scored"' in fake_session.last_text
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_run_game_chat_sends_filtered_llm_visible_event(monkeypatch):
+    class FakeSession:
+        def __init__(self):
+            self.last_text = ""
+
+        async def stream_text(self, text):
+            self.last_text = text
+
+        async def update_session(self, _config):
+            return None
+
+    fake_session = FakeSession()
+    key = game_router._game_session_key("Lan", "soccer", "match_filtered")
+    game_router._game_sessions[key] = {
+        "session": fake_session,
+        "reply_chunks": [],
+        "lanlan_name": "Lan",
+        "lanlan_prompt": "",
+        "user_language": "zh",
+        "game_type": "soccer",
+        "session_id": "match_filtered",
+        "last_activity": 0,
+        "lock": asyncio.Lock(),
+        "instructions": "stub",
+    }
+    monkeypatch.setattr(game_router, "_refresh_game_session_instructions", AsyncMock())
+
+    await game_router._run_game_chat(
+        "soccer",
+        "match_filtered",
+        {
+            "kind": "mailbox-batch",
+            "lanlan_name": "Lan",
+            "soccerGameMemoryEnabled": True,
+            "soccer_game_memory_enabled": True,
+            "soccerGameMemoryPlayerInteractionEnabled": True,
+            "soccer_game_memory_player_interaction_enabled": True,
+            "soccerGameMemoryEventReplyEnabled": True,
+            "soccer_game_memory_event_reply_enabled": True,
+            "gameMemoryEnabled": True,
+            "game_memory_enabled": True,
+            "balanceHint": {"message": "暂时保留"},
+            "angerPressureCap": {"message": "暂时保留", "reached": False},
+            "currentState": {
+                "round": 2,
+                "score": {"player": 1, "ai": 1},
+                "aiFreezeSec": 0,
+                "playerKickStartleWindowSec": 0,
+                "playerKickWallBounceForStartle": False,
+                "startle": {"directCdSec": 0, "grazeCdSec": 0, "mutualLockSec": 0},
+                "zoneoutCooldownSec": 0,
+                "ballGhost": False,
+            },
+            "pendingItems": [{
+                "kind": "user-voice",
+                "priority": 8,
+                "source": "voice_input_gate",
+                "builtinFallback": "备用台词",
+                "snapshot": {
+                    "round": 1,
+                    "score": {"player": 0, "ai": 1},
+                    "aiFreezeSec": 0.3,
+                    "ballGhost": True,
+                },
+            }],
+        },
+    )
+
+    payload_text = fake_session.last_text.split("======以下为游戏事件输入======", 1)[1]
+    payload_text = payload_text.split("======以上为游戏事件输入======", 1)[0].strip()
+    payload = json.loads(payload_text)
+
+    assert "lanlan_name" not in payload
+    assert "soccerGameMemoryEnabled" not in payload
+    assert "soccer_game_memory_enabled" not in payload
+    assert "gameMemoryEnabled" not in payload
+    assert "game_memory_enabled" not in payload
+    assert "aiFreezeSec" not in payload["currentState"]
+    assert "playerKickStartleWindowSec" not in payload["currentState"]
+    assert "playerKickWallBounceForStartle" not in payload["currentState"]
+    assert "startle" not in payload["currentState"]
+    assert "zoneoutCooldownSec" not in payload["currentState"]
+    assert "ballGhost" not in payload["currentState"]
+    assert "aiFreezeSec" not in payload["pendingItems"][0]["snapshot"]
+    assert "ballGhost" not in payload["pendingItems"][0]["snapshot"]
+    assert payload["pendingItems"][0]["priority"] == 8
+    assert payload["pendingItems"][0]["source"] == "voice_input_gate"
+    assert payload["pendingItems"][0]["builtinFallback"] == "备用台词"
+    assert isinstance(payload["balanceHint"].get("message"), str)
+    assert payload["angerPressureCap"]["message"] == "暂时保留"
 
 
 @pytest.mark.unit
