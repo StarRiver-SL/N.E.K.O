@@ -1811,6 +1811,108 @@ PROACTIVE_CHAT_HISTORY_MAX = 10
 - 用途：每个 lanlan 维护的最近主动搭话记录，用于 1h 内去重。
 - 上游：proactive 触发的搭话事件。"""
 
+# ── Focus mode 凝神 (docs/design/focus-truename-mode.md) ───────────────
+# 信号触发、用户无感的「这一轮开思考 + 换强模型」机制，兑现 90/10 产品命题
+# 里的 10% 神明降临。以下全是 A/B 可调旋钮，集中在此便于灰度调参；情绪关键词
+# 这类多语言词表按 i18n 规约放 config/prompts/prompts_focus.py，不在这里。
+FOCUS_MODE_ENABLED = False
+"""凝神总开关（默认关）。
+- 用途：关掉 = FocusScorer 永不评分、SM 永远停在 REGULAR，两条触发路径都退化回
+  常规（proactive 仍 disable_thinking、stream_text 不升档），逐字节零行为变化。
+- 默认关原因：阈值尚未用真实信号分布调过、且 thinking-on 的端到端行为（内联推理
+  文本在流式 content 里的泄露、各 provider 思考开销）未对真模型验证过。先 inert
+  落地，验证 + 调参后再按 provider opt-in 打开。详见 docs/design/focus-truename-mode.md。
+- 上游：FocusScorer / SessionStateMachine 入口的早退判定。"""
+
+# ── 累积进入模型（leaky 累加器）─────────────────────────────────────
+# 进入不是「单轮分数越线」而是「逐轮累加的电荷值越线」：每轮
+#   charge = charge × FOCUS_CHARGE_RETENTION + 本轮score
+# charge ≥ ENTER 进入、< EXIT 退出（迟滞带）。这样零散漏出的脆弱信号能攒够进入，
+# 而转中性后 charge 每轮按 retention 漏掉、自然退出（替代旧的「连续 K 轮低分」
+# streak——streak 会被噪音单轮顶回而卡死，见 PR 实测）。
+FOCUS_CHARGE_RETENTION = 0.5
+"""电荷每轮的保留率（0~1）。
+- 用途：charge = charge × 此值 + 本轮score。0.5 = 每轮留 50%、漏 50%。
+- 调高（如 0.7/0.8）= 记性更长、零散信号更易累积进入、进去后更黏；
+  调低（如 0.3）= 漏得快、难累积、退得利落。
+- 稳态：持续每轮 score=s 时 charge → s/(1-retention)（如 retention=0.5、s=0.5 → 趋近 1.0）。
+- 这是「敏感度」主旋钮。"""
+
+FOCUS_CHARGE_ENTER = 1.0
+"""进入凝神的电荷阈值。
+- 用途：charge ≥ 此值 → REGULAR→FOCUS。
+- 一句重话（score≈1.0）即可秒进；零散脆弱靠累积逼近此值后进入。
+- 调低 = 更易进。charge 进入后被 cap 在此值（避免长重情节拖出过长尾巴）。"""
+
+FOCUS_CHARGE_EXIT = 0.3
+"""退出凝神的电荷阈值（迟滞低门，须 < ENTER）。
+- 用途：FOCUS 期间 charge < 此值 → 退出。
+- 转中性后从 cap 处按 retention 漏：retention=0.5/cap=1.0 时约 2 轮漏到 0.25<0.3 退出
+  （即「她降临后追一两轮才放下」）。调低 = 更黏、追更久。"""
+
+FOCUS_HARD_CAP_TURNS = 8
+"""单次凝神最多持续轮数 M（硬顶 backstop）。
+- 用途：即使 charge 一直在 EXIT 以上（用户持续重话），满 M 轮也强制退出收个尾，
+  防单个情节无限拖长。
+- 上游：SM 的 focus_turn_count 计数器。"""
+
+FOCUS_SIGNAL_WEIGHTS: dict[str, float] = {
+    "keyword": 0.45,      # 用户消息命中脆弱情绪词（inline 路径专属）
+    "cadence": 0.20,      # 回复字数相对基线骤跌（inline 路径专属）
+    "silence": 0.20,      # 静默时长（idle 路径专属）
+    "open_thread": 0.15,  # 存在未收尾话题 / 到点的 followup（idle 路径专属）
+}
+"""FocusScorer 各信号的相对权重。
+- 用途：scorer 按当前路径取「适用」信号子集，对子集内权重重新归一后加权平均
+  → 该轮 score（再喂给累加器）。inline（有新消息）适用 keyword+cadence；idle
+  （无新消息）适用 silence+open_thread。不适用的信号返回 None、不进归一化分母。
+- ⚠️ open_thread 仅 idle 适用：inline 路径上 on_user_message 已先清掉 unfinished_thread，
+  再读只会得结构性 0 拉低均值；用户脆弱回复由 keyword 捕获。故 inline 实际分母是
+  keyword+cadence（0.45+0.20），不含 open_thread。
+- 上游：各子信号各自归一化到 [0,1]。
+- 设计依据：keyword 是 inline 最强单信号故权重最高。改这里直接改触发性格，慎调。"""
+
+FOCUS_KEYWORD_SATURATION = 3
+"""脆弱情绪关键词命中数的饱和点。
+- 用途：scan_vulnerability_keywords 返回的命中数 / 此值后截到 1.0 作为 keyword
+  子信号——单个「累」是轻推，「撑不住 + 一个人 + 没意思」叠加才是满格。
+- 上游：config/prompts/prompts_focus.scan_vulnerability_keywords 的命中计数。"""
+
+FOCUS_CADENCE_BASELINE_WINDOW = 6
+"""cadence 信号的基线窗口：取最近 N 条用户消息长度算中位数做基线。
+- 用途：FocusScorer 内 per-session 滚动 buffer 的 maxlen。
+- 上游：每条真用户消息的字符长度。"""
+
+FOCUS_CADENCE_MIN_SAMPLES = 3
+"""cadence 信号生效所需的最小样本数。
+- 用途：buffer 内样本不足 N 时 cadence 子信号判为「不适用」（不进归一化），
+  避免会话刚开头基线不稳就乱触发。
+- 上游：滚动 buffer 当前长度。"""
+
+FOCUS_CADENCE_DROP_RATIO = 0.4
+"""cadence 满格所需的「当前长度 / 基线中位数」下跌比。
+- 用途：当前消息长度 ≤ 此比 × 基线中位数 → cadence 子信号 = 1.0；≥ 基线 → 0.0；
+  中间线性。例：基线 30 字、ratio 0.4，则 ≤12 字（「嗯。」「知道了。」）算满格。
+- 上游：当前消息长度与基线中位数之比。"""
+
+FOCUS_SILENCE_MIN_SECONDS = 300
+"""silence 子信号的起跳静默秒数。
+- 用途：seconds_since_user_msg < 此值 → silence 子信号 = 0（日常停顿不算）。
+- 上游：ActivitySnapshot.seconds_since_user_msg。"""
+
+FOCUS_SILENCE_FULL_SECONDS = 1800
+"""silence 子信号满格的静默秒数。
+- 用途：seconds_since_user_msg ≥ 此值 → silence = 1.0；MIN~FULL 间线性。
+- 上游：ActivitySnapshot.seconds_since_user_msg。"""
+
+# NOTE: FOCUS_IDLE_THRESHOLD_MULTIPLIER（凝神态下调低 idle 触发阈值「她降临一次后
+# 主动追一两轮」）属 Path B 的 idle-threshold-drop 子特性，该特性尚未接线，故旋钮
+# 暂不引入，待实现该 feature 时再随它一起加，避免留下死配置。设计见 blueprint。
+
+# NOTE: FOCUS_EPISODE_MEMORY_ENABLED（凝神退出顺便批量整理 reflection/persona/
+# facts/ban-list 的开关）同理暂不引入——FOCUS_EXIT → memory 订阅者特性尚未接线，
+# 旋钮待该 PR 实现时随它加回，避免死配置。设计见 docs/design/focus-truename-mode.md。
+
 MINI_GAME_INVITE_ENABLED = True
 """Mini-game 邀请短路通道总开关（默认开）。
 - 用途：proactive_chat 在过完 propensity / skip_probability / restricted_screen_only
@@ -2006,6 +2108,7 @@ from config.providers import (  # noqa: E402, F401
     MODELS_EXTRA_BODY_MAP,
     get_extra_body,
     get_agent_extra_body,
+    focus_extra_body,
 )
 
 
@@ -2051,6 +2154,7 @@ __all__ = [
     'MODELS_EXTRA_BODY_MAP',
     'get_extra_body',
     'get_agent_extra_body',
+    'focus_extra_body',
     'EXTRA_BODY_OPENAI',
     'EXTRA_BODY_CLAUDE',
     'EXTRA_BODY_GEMINI',

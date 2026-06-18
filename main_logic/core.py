@@ -64,7 +64,7 @@ from main_logic.tool_calling import (
     ToolResult,
 )
 from utils.llm_client import AIMessage, HumanMessage
-from main_logic.session_state import SessionStateMachine, SessionEvent, ProactivePhase
+from main_logic.session_state import SessionStateMachine, SessionEvent, ProactivePhase, CognitionMode
 from main_logic.lifecycle_bus import LifecycleEventBus
 from main_logic.proactive_delivery import (
     DELIVERY_RETRACTED_KEY,
@@ -86,6 +86,10 @@ from config import (
     AVATAR_INTERACTION_DEDUPE_MAX_ITEMS,
     HIDE_DIRTY_VOICE_TRANSCRIPTS,
 )
+# FOCUS_MODE_ENABLED is read live with a function-local ``from config import
+# FOCUS_MODE_ENABLED`` at each gate (re-imported per call → picks up a runtime
+# toggle / test monkeypatch), consistent with how the SM/scorer read the other
+# knobs at call time. Single import style keeps the module clean.
 from config.prompts.prompts_sys import (
     _loc,
     SESSION_INIT_PROMPT, SESSION_INIT_PROMPT_AGENT,
@@ -1004,13 +1008,20 @@ class LLMSessionManager:
         # 用户活动 tracker：把窗口/进程/CPU/idle/语音/对话信号聚合成结构化
         # ActivitySnapshot，供 proactive_chat Phase 1/2 决策搭话倾向。
         # 详见 docs/design/user-activity-tracker.md。
-        from main_logic.activity import UserActivityTracker
+        from main_logic.activity import FocusScorer, UserActivityTracker
         from main_logic.conversation_turns import create_default_turn_dispatcher
         self._activity_tracker = UserActivityTracker(lanlan_name)
         self._turn_dispatcher = create_default_turn_dispatcher(
             lanlan_name,
             self._activity_tracker,
         )
+
+        # Focus mode 凝神 scorer（docs/design/focus-truename-mode.md）：把
+        # ActivitySnapshot + 用户消息文本评成一个 [0,1] 分，喂给 self.state
+        # 的迟滞状态机决定这一轮是否「升档」开思考。per-session 实例，仅持有
+        # cadence 基线滚动 buffer。两条触发路径（inline stream_text / idle
+        # proactive）共用同一个 scorer，保证行为不分裂。
+        self._focus_scorer = FocusScorer(lanlan_name)
 
         # 进入游戏/娱乐 或 进入专注工作时，给前端推一次性情境信号——前端（每会话每类
         # 一次）据此弹窗问要不要开/关主动搭话里的屏幕分享来源。后端只检测「进入」那一刻
@@ -1674,6 +1685,121 @@ class LLMSessionManager:
         self._tts_done_pending_until_ready = False
         async with self.lock:
             self.current_speech_id = str(uuid4())
+
+    async def _focus_inline_decision(self, user_text: str) -> bool:
+        """Path A (inline) Focus gate: score the just-arrived user message and
+        return whether THIS reply should run thinking-on.
+
+        Scores via the shared ``FocusScorer`` (keyword + cadence + open-thread
+        signals), advances ``self.state``'s hysteresis (``update_focus``), and
+        returns ``mode is FOCUS``. An explicit topic switch forces an immediate
+        exit. Best-effort: any failure degrades to regular (thinking-off) and
+        never blocks the user reply. Returns False fast when the master switch
+        is off (skips the snapshot cost).
+        """
+        from config import FOCUS_MODE_ENABLED  # live read (re-imported per call)
+        if not FOCUS_MODE_ENABLED:
+            # Flag flipped off → clear ALL focus residue unconditionally, not
+            # just when mode==FOCUS. The leaky accumulator can sit in REGULAR
+            # with charge just under the enter bar; if we only cleared on FOCUS,
+            # that frozen charge would survive the disabled window and let an
+            # unrelated mild cue enter on stale evidence once re-enabled.
+            # update_focus self-clears when the switch is off (idempotent).
+            await self.state.update_focus(0.0)
+            return False
+        if not (user_text and user_text.strip()):
+            return False
+        try:
+            from config.prompts.prompts_focus import detect_topic_switch
+            # Focus scores the user's MESSAGE, not the screen: the inline
+            # signals (vulnerability keywords + reply cadence) read user_text
+            # and the scorer's own cadence buffer — never the activity snapshot
+            # (silence / open_thread are idle-only). So Focus is
+            # privacy-independent BY CONSTRUCTION and must NOT be gated on
+            # privacy mode: understanding the user's emotional state from what
+            # they typed is core to an AI companion. Privacy mode governs only
+            # SCREEN / app-state visibility (see docs/contributing/
+            # developer-notes.md rule 6). Hence no snapshot fetch here.
+            scored = self._focus_scorer.score(None, user_text=user_text)
+            topic_changed = detect_topic_switch(user_text)
+            mode = await self.state.update_focus(
+                scored.score, topic_changed=topic_changed,
+            )
+            # Log every turn (incl. REGULAR) so tuning can watch the charge
+            # accumulate toward FOCUS_CHARGE_ENTER, not just the entry moment.
+            logger.info(
+                "[%s] 凝神 inline: score=%.2f charge=%s mode=%s signals=%s",
+                self.lanlan_name, scored.score,
+                self.state.snapshot().get("focus_charge"), mode.value, scored.signals,
+            )
+            return mode is CognitionMode.FOCUS
+        except Exception as e:
+            logger.warning("[%s] focus inline decision failed (degrading to regular): %s",
+                           self.lanlan_name, e)
+            # Don't leave a stale FOCUS episode if score / update_focus raised
+            # mid-episode — degrade cleanly to regular.
+            try:
+                if self.state.mode is CognitionMode.FOCUS:
+                    await self.state.update_focus(0.0, topic_changed=True)
+            except Exception as _exit_err:
+                logger.debug("[%s] focus inline fail-exit also failed: %s",
+                             self.lanlan_name, _exit_err)
+            return False
+
+    async def _focus_idle_decision(self, snapshot) -> bool:
+        """Path B (idle) Focus gate: score a silence window (no fresh user
+        message) and return whether THIS proactive reply should run thinking-on.
+
+        Idle-path signals are silence + open-thread (keyword/cadence need a
+        message and are N/A). Advances the SAME ``self.state`` hysteresis as
+        the inline path so a focus episode is one shared state regardless of
+        which path drove it. Best-effort; degrades to regular on any failure
+        or when the master switch is off. When no snapshot is available this
+        tick (tracker unavailable / privacy nulls SCREEN data) the idle signals
+        can't be computed, so it simply skips — it does NOT clear the
+        accumulator, since the privacy-independent inline path is still driving
+        the episode and clearing here would wipe a live one.
+
+        Note (tuning): because proactive fires on a schedule, idle ticks can
+        accumulate toward the low-streak exit faster than conversational turns
+        — the cross-path interaction is a known knob (see
+        docs/design/focus-truename-mode.md).
+        """
+        from config import FOCUS_MODE_ENABLED  # live read (re-imported per call)
+        if not FOCUS_MODE_ENABLED:
+            # Clear unconditionally (not just on FOCUS) so a REGULAR charge
+            # frozen under the enter bar can't survive a disabled window —
+            # mirrors the inline disabled gate. update_focus self-clears when
+            # the switch is off.
+            await self.state.update_focus(0.0)
+            return False
+        if snapshot is None:
+            # No activity data this idle tick (tracker unavailable / privacy
+            # nulls SCREEN data). Idle signals (silence / open_thread) need it,
+            # so skip scoring — but do NOT touch the accumulator: the
+            # privacy-independent inline path keeps driving the episode, and
+            # clearing here would wipe a legitimate in-progress Focus.
+            return False
+        try:
+            scored = self._focus_scorer.score(snapshot, user_text=None)
+            mode = await self.state.update_focus(scored.score)
+            logger.info(
+                "[%s] 凝神 idle: score=%.2f charge=%s mode=%s signals=%s",
+                self.lanlan_name, scored.score,
+                self.state.snapshot().get("focus_charge"), mode.value, scored.signals,
+            )
+            return mode is CognitionMode.FOCUS
+        except Exception as e:
+            logger.warning("[%s] focus idle decision failed (degrading to regular): %s",
+                           self.lanlan_name, e)
+            # Mirror the inline path: don't leave a stale FOCUS episode on failure.
+            try:
+                if self.state.mode is CognitionMode.FOCUS:
+                    await self.state.update_focus(0.0, topic_changed=True)
+            except Exception as _exit_err:
+                logger.debug("[%s] focus idle fail-exit also failed: %s",
+                             self.lanlan_name, _exit_err)
+            return False
 
     async def handle_text_data(
         self,
@@ -3211,10 +3337,22 @@ class LLMSessionManager:
         await self.disconnected_by_server(expected_session=expected_session)
     
     async def handle_repetition_detected(self):
-        """Handle the repetition-detection callback: notify the frontend"""
+        """Handle the repetition-detection callback: reset Focus state, notify the frontend"""
         try:
             logger.warning(f"[{self.lanlan_name}] 检测到高重复度对话")
-            
+
+            # Repetition recovery wiped _conversation_history — the Focus
+            # accumulator charge / mode and the cadence baseline are evidence
+            # from the now-erased conversation, so clear them too (对偶
+            # _init_renew_status 的会话级清场). clear_focus emits no FOCUS_EXIT:
+            # a degenerate looping episode is not a coherent episode to
+            # synthesize. Best-effort — never block the frontend notice.
+            try:
+                await self.state.clear_focus()
+                self._focus_scorer.reset()
+            except Exception as _focus_err:
+                logger.debug(f"[{self.lanlan_name}] focus reset on repetition failed: {_focus_err}")
+
             # 向前端发送重复警告消息（使用 i18n key）
             if self.websocket and hasattr(self.websocket, 'client_state') and self.websocket.client_state == self.websocket.client_state.CONNECTED:
                 await self.websocket.send_json({
@@ -3737,6 +3875,9 @@ class LLMSessionManager:
         # teardown 必须用 force=True：默认 reset() 会在活动 phase 上 no-op（保护
         # auto-start 不被误清），但 end_session 语义就是整轮收尾，必须强制清场。
         await self.state.reset(force=True)
+        # 对偶 SM.reset 清 focus 态：scorer 的 cadence 基线也按会话隔离，新会话
+        # 不继承上一会话的消息长度基线。
+        self._focus_scorer.reset()
 
     def _realtime_base_url(self) -> str:
         """Read the realtime route's base_url, for the native voice routing host remap
@@ -8154,12 +8295,24 @@ class LLMSessionManager:
                             _agent_cb_ctx = ""
 
                     self._active_text_request_id = message.get("request_id")
+                    # Path A (inline) Focus 凝神：score this user message and, if
+                    # over the bar, run THIS reply thinking-on. Scored on
+                    # ``record_data`` (= memory_text or data) — the user-VISIBLE
+                    # text that also feeds the activity tracker / cadence baseline
+                    # and history replacement. Scoring raw ``data`` instead would
+                    # read a hidden scaffold prompt (e.g. avatar-drop file
+                    # contents) the user never typed, mismatching the cadence
+                    # signal and entering Focus on evidence the user didn't author.
+                    _focus_thinking = await self._focus_inline_decision(record_data)
                     input_transcript_callback = None
                     if memory_text:
                         async def input_transcript_callback(_transcript: str, *, _memory_text: str = memory_text) -> None:
                             await self.handle_input_transcript(_memory_text, is_voice_source=False)
 
-                    stream_text_kwargs = {"system_prefix": _agent_cb_ctx or None}
+                    stream_text_kwargs = {
+                        "system_prefix": _agent_cb_ctx or None,
+                        "thinking_on": _focus_thinking,
+                    }
                     if input_transcript_callback:
                         stream_text_kwargs["input_transcript_callback"] = input_transcript_callback
                     if memory_text:
