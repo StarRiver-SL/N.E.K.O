@@ -21,12 +21,14 @@ import { parseChatMessage, type CompactChatState } from './message-schema';
 
 describe('App', () => {
   const COMPACT_EXPORT_HISTORY_OPEN_STORAGE_KEY = 'neko.reactChatWindow.compactExportHistoryOpen';
+  const COMPACT_HISTORY_DEFAULT_EXPERIMENT_KEY = 'neko.experiment.compactHistoryDefault';
   const COMPACT_HISTORY_HEIGHT_STORAGE_KEY = 'neko.reactChatWindow.compactHistorySlotHeight';
   const COMPACT_INPUT_TOOL_WHEEL_INDEX_STORAGE_KEY = 'neko.reactChatWindow.compactInputToolWheelIndex';
   const DEFAULT_CHAT_EMPTY_STATE_FALLBACK = getChatEmptyStateFallback('en');
   const DEFAULT_CHAT_COMPANION_EMPTY_STATE_FALLBACK = getChatCompanionEmptyStateFallback('en');
   const LOCAL_STORAGE_KEYS_TO_RESET = [
     COMPACT_EXPORT_HISTORY_OPEN_STORAGE_KEY,
+    COMPACT_HISTORY_DEFAULT_EXPERIMENT_KEY,
     COMPACT_HISTORY_HEIGHT_STORAGE_KEY,
     COMPACT_INPUT_TOOL_WHEEL_INDEX_STORAGE_KEY,
     ACTIVE_AVATAR_TOOLS_STORAGE_KEY,
@@ -36,6 +38,9 @@ describe('App', () => {
     LOCAL_STORAGE_KEYS_TO_RESET.forEach(key => {
       window.localStorage.removeItem(key);
     });
+    // 历史 UI 用例需要历史区默认展开：A/B 变体默认值现改为「教程完全结束后」才异步套用，测试里直接给一个
+    // 显式持久化「开」偏好，让历史区同步展开、与实验门控解耦（实验/门控行为另有专门用例覆盖）。
+    window.localStorage.setItem(COMPACT_EXPORT_HISTORY_OPEN_STORAGE_KEY, 'true');
     delete window.__NEKO_REACT_CHAT_ASSET_VERSION__;
     delete (window as Window & { NekoGameSystem?: unknown }).NekoGameSystem;
     resetCompactToolWheelDetentAudioForTests();
@@ -586,6 +591,154 @@ describe('App', () => {
     }
   });
 
+  it('keeps compact history collapsed by default and only applies the open variant after the tutorial ends', () => {
+    window.localStorage.removeItem(COMPACT_EXPORT_HISTORY_OPEN_STORAGE_KEY);
+    window.localStorage.setItem(COMPACT_HISTORY_DEFAULT_EXPERIMENT_KEY, 'open');
+    const message = parseChatMessage({
+      id: 'assistant-gate-1', role: 'assistant', author: 'Neko', time: '10:00', createdAt: 1,
+      blocks: [{ type: 'text', text: 'hi' }], status: 'sent',
+    });
+    const { container } = render(
+      <App chatSurfaceMode="compact" compactChatState="input" messages={[message]} />,
+    );
+    // 无显式偏好 → 初始折叠（即便 variant=open，也要等教程结束才展开）
+    expect(container.querySelector('.compact-export-history-anchor')).toBeNull();
+    // 教程完成 → 套用 open 变体 → 展开
+    act(() => {
+      window.dispatchEvent(new Event('neko:tutorial-completed'));
+    });
+    expect(container.querySelector('.compact-export-history-anchor')).not.toBeNull();
+  });
+
+  it('does not allocate the history experiment variant when starting on a full surface (keeps compact A/B clean)', () => {
+    window.localStorage.removeItem(COMPACT_EXPORT_HISTORY_OPEN_STORAGE_KEY);
+    window.localStorage.removeItem(COMPACT_HISTORY_DEFAULT_EXPERIMENT_KEY);
+    const message = parseChatMessage({
+      id: 'assistant-full-gate', role: 'assistant', author: 'Neko', time: '10:00', createdAt: 1,
+      blocks: [{ type: 'text', text: 'hi' }], status: 'sent',
+    });
+    render(<App chatSurfaceMode="full" messages={[message]} />);
+    act(() => {
+      window.dispatchEvent(new Event('neko:tutorial-completed'));
+    });
+    // full → FullChatSurface（CompactChatApp 不 mount），实验 effect 不跑：不分配 variant、不上报曝光，
+    // full-surface 用户没见过紧凑历史面板，不该进入 compact A/B 样本。
+    expect(window.localStorage.getItem(COMPACT_HISTORY_DEFAULT_EXPERIMENT_KEY)).toBeNull();
+  });
+
+  it('still reports the exposure when sessionStorage access throws (privacy mode)', () => {
+    window.localStorage.removeItem(COMPACT_EXPORT_HISTORY_OPEN_STORAGE_KEY);
+    window.localStorage.setItem(COMPACT_HISTORY_DEFAULT_EXPERIMENT_KEY, 'closed');
+    const telemetry = vi.fn(() => true);
+    (window as unknown as { appTelemetry?: { event: (n: string, f?: Record<string, unknown>) => boolean } }).appTelemetry = { event: telemetry };
+    // 只让 sessionStorage.getItem 抛（隐私浏览器/webview），localStorage 仍可读 cohort——
+    // 二者共享 Storage.prototype，按 this 区分。
+    const realGetItem = Storage.prototype.getItem;
+    const getItemSpy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(function (this: Storage, key: string) {
+      if (this === window.sessionStorage) throw new DOMException('denied', 'SecurityError');
+      return realGetItem.call(this, key);
+    });
+    try {
+      const message = parseChatMessage({
+        id: 'assistant-privacy-exposure', role: 'assistant', author: 'Neko', time: '10:00', createdAt: 1,
+        blocks: [{ type: 'text', text: 'hi' }], status: 'sent',
+      });
+      render(<App chatSurfaceMode="compact" compactChatState="input" messages={[message]} />);
+      act(() => {
+        window.dispatchEvent(new Event('neko:tutorial-completed'));
+      });
+      // sessionStorage 去重读失败不能吞掉曝光：有 variant 的用户仍要发出 experiment_exposure。
+      expect(telemetry).toHaveBeenCalledWith('experiment_exposure', expect.objectContaining({
+        experiment: 'compact_history_default',
+        variant: 'closed',
+      }));
+    } finally {
+      getItemSpy.mockRestore();
+      delete (window as unknown as { appTelemetry?: unknown }).appTelemetry;
+    }
+  });
+
+  it('keeps the proactive meme overlay through the same-turn assistant caption that follows it', () => {
+    // 回归：主动分享是「发表情包 + 说台词」，台词是 assistant 消息、紧随 meme 落地。
+    // 旧逻辑「有新消息就收起」会让图一瞬间被台词顶掉（线上实测：图闪一下就没）。
+    const meme = parseChatMessage({
+      id: 'meme-abc123',
+      role: 'assistant',
+      author: 'Neko',
+      time: '10:00',
+      createdAt: 1,
+      blocks: [{ type: 'image', url: '/api/meme/proxy-image?url=x', alt: 'lol' }],
+      status: 'sent',
+    });
+    const { container, rerender } = render(
+      <App chatSurfaceMode="compact" compactChatState="input" messages={[meme]} />,
+    );
+    const img = container.querySelector('.compact-meme-overlay img');
+    expect(img).not.toBeNull();
+    expect(img).toHaveAttribute('src', '/api/meme/proxy-image?url=x');
+
+    const caption = parseChatMessage({
+      id: 'assistant-newer',
+      role: 'assistant',
+      author: 'Neko',
+      time: '10:01',
+      createdAt: 2,
+      blocks: [{ type: 'text', text: 'hi' }],
+      status: 'sent',
+    });
+    rerender(<App chatSurfaceMode="compact" compactChatState="input" messages={[meme, caption]} />);
+    expect(container.querySelector('.compact-meme-overlay img')).toHaveAttribute('src', '/api/meme/proxy-image?url=x');
+  });
+
+  it('collapses the meme overlay once the user speaks again', () => {
+    const meme = parseChatMessage({
+      id: 'meme-abc123', role: 'assistant', author: 'Neko', time: '10:00', createdAt: 1,
+      blocks: [{ type: 'image', url: '/api/meme/proxy-image?url=x', alt: 'lol' }], status: 'sent',
+    });
+    const { container, rerender } = render(
+      <App chatSurfaceMode="compact" compactChatState="input" messages={[meme]} />,
+    );
+    expect(container.querySelector('.compact-meme-overlay')).not.toBeNull();
+
+    const userReply = parseChatMessage({
+      id: 'user-1', role: 'user', author: 'Me', time: '10:02', createdAt: 3,
+      blocks: [{ type: 'text', text: 'haha' }], status: 'sent',
+    });
+    rerender(<App chatSurfaceMode="compact" compactChatState="input" messages={[meme, userReply]} />);
+    expect(container.querySelector('.compact-meme-overlay')).toBeNull();
+  });
+
+  it('keeps the meme overlay alongside a music card from the same share (independent widgets)', () => {
+    const meme = parseChatMessage({
+      id: 'meme-xyz', role: 'assistant', author: 'Neko', time: '10:00', createdAt: 1,
+      blocks: [{ type: 'image', url: '/api/meme/proxy-image?url=y', alt: 'lol' }], status: 'sent',
+    });
+    const musicCard = parseChatMessage({
+      id: 'music-abc', role: 'assistant', author: 'Neko', time: '10:00', createdAt: 2,
+      blocks: [{ type: 'link', url: 'https://example.com/song', title: 'Song' }], status: 'sent',
+    });
+    const { container } = render(
+      <App chatSurfaceMode="compact" compactChatState="input" messages={[meme, musicCard]} />,
+    );
+    expect(container.querySelector('.compact-meme-overlay img')).toHaveAttribute('src', '/api/meme/proxy-image?url=y');
+  });
+
+  it('keeps the meme overlay even when a much later music-only turn arrives (no user message)', () => {
+    // 表情包是独立挂件，不被猫娘后续的音乐分享收起；只有用户开口才换场。
+    const meme = parseChatMessage({
+      id: 'meme-old', role: 'assistant', author: 'Neko', time: '10:00', createdAt: 1000,
+      blocks: [{ type: 'image', url: '/api/meme/proxy-image?url=z', alt: 'lol' }], status: 'sent',
+    });
+    const laterMusic = parseChatMessage({
+      id: 'music-later', role: 'assistant', author: 'Neko', time: '10:05', createdAt: 1000 + 60000,
+      blocks: [{ type: 'link', url: 'https://example.com/song2', title: 'Song2' }], status: 'sent',
+    });
+    const { container } = render(
+      <App chatSurfaceMode="compact" compactChatState="input" messages={[meme, laterMusic]} />,
+    );
+    expect(container.querySelector('.compact-meme-overlay img')).toHaveAttribute('src', '/api/meme/proxy-image?url=z');
+  });
+
   it('defaults compact history open and preserves history controls through visibility toggles', async () => {
     const onExportConversationClick = vi.fn();
     const message = parseChatMessage({
@@ -636,7 +789,7 @@ describe('App', () => {
     expect(container.querySelector('.compact-export-history-bubble')).not.toHaveAttribute('aria-pressed');
     expect(container.querySelector('.compact-export-history-bubble')).toHaveAttribute('aria-disabled', 'true');
     expect(container.querySelector('.compact-export-history-bubble')).toHaveAttribute('tabindex', '-1');
-    expect(window.localStorage.getItem(COMPACT_EXPORT_HISTORY_OPEN_STORAGE_KEY)).toBeNull();
+    expect(window.localStorage.getItem(COMPACT_EXPORT_HISTORY_OPEN_STORAGE_KEY)).toBe('true');
 
     const exportButton = await clickCompactExportTool();
     expect(container.querySelector('.compact-export-history-bubble')).toHaveAttribute('role', 'button');
@@ -661,8 +814,8 @@ describe('App', () => {
 
       fireEvent.click(container.querySelector<HTMLButtonElement>('.compact-history-visibility-handle')!);
       expect(container.querySelector('.compact-export-history-anchor')).toHaveAttribute('data-compact-export-history-visibility', 'closing');
-      expect(container.querySelector('.compact-music-player-mount')).toHaveAttribute('data-compact-music-player-visibility', 'closing');
-      expect(container.querySelector('.compact-music-player-mount')).toHaveAttribute('aria-hidden', 'true');
+      expect(container.querySelector('.compact-music-player-mount')).toHaveAttribute('data-compact-music-player-visibility', 'open');
+      expect(container.querySelector('.compact-music-player-mount')).not.toHaveAttribute('aria-hidden');
       expect(container.querySelector('.compact-history-visibility-handle')).toHaveAttribute('aria-expanded', 'false');
       expect(exportButton).toHaveAttribute('aria-pressed', 'false');
       expect(container.querySelector('.compact-export-history-bubble')).not.toHaveAttribute('role');
@@ -686,8 +839,8 @@ describe('App', () => {
       expect(container.querySelector('.compact-export-history-anchor')).toBeNull();
       expect(container.querySelectorAll('#music-player-mount')).toHaveLength(1);
       expect(container.querySelector('.compact-music-player-mount#music-player-mount')).not.toBeNull();
-      expect(container.querySelector('.compact-music-player-mount')).toHaveAttribute('data-compact-music-player-visibility', 'closed');
-      expect(container.querySelector('.compact-music-player-mount')).toHaveAttribute('aria-hidden', 'true');
+      expect(container.querySelector('.compact-music-player-mount')).toHaveAttribute('data-compact-music-player-visibility', 'open');
+      expect(container.querySelector('.compact-music-player-mount')).not.toHaveAttribute('aria-hidden');
       expect(container.querySelector('.composer-panel #music-player-mount')).toBeNull();
       expect(container.querySelector('.compact-export-history-panel #music-player-mount')).toBeNull();
       expect(container.querySelector('[data-compact-hit-region-id^="history:"]')).toBeNull();
@@ -858,8 +1011,8 @@ describe('App', () => {
       expect(container.querySelector('.compact-export-history-anchor')).toBeNull();
       expect(container.querySelectorAll('#music-player-mount')).toHaveLength(1);
       expect(container.querySelector('.compact-music-player-mount#music-player-mount')).not.toBeNull();
-      expect(container.querySelector('.compact-music-player-mount')).toHaveAttribute('data-compact-music-player-visibility', 'closed');
-      expect(container.querySelector('.compact-music-player-mount')).toHaveAttribute('aria-hidden', 'true');
+      expect(container.querySelector('.compact-music-player-mount')).toHaveAttribute('data-compact-music-player-visibility', 'open');
+      expect(container.querySelector('.compact-music-player-mount')).not.toHaveAttribute('aria-hidden');
       expect(container.querySelector('.composer-panel #music-player-mount')).toBeNull();
 
       fireEvent.pointerDown(handle!, { pointerType: 'mouse', button: 0 });
@@ -880,8 +1033,8 @@ describe('App', () => {
       fireEvent.pointerDown(handle!, { pointerType: 'mouse', button: 0 });
       expect(handle).toHaveAttribute('aria-expanded', 'false');
       expect(container.querySelector('.compact-export-history-anchor')).toHaveAttribute('data-compact-export-history-visibility', 'closing');
-      expect(container.querySelector('.compact-music-player-mount')).toHaveAttribute('data-compact-music-player-visibility', 'closing');
-      expect(container.querySelector('.compact-music-player-mount')).toHaveAttribute('aria-hidden', 'true');
+      expect(container.querySelector('.compact-music-player-mount')).toHaveAttribute('data-compact-music-player-visibility', 'open');
+      expect(container.querySelector('.compact-music-player-mount')).not.toHaveAttribute('aria-hidden');
       expect(window.localStorage.getItem(COMPACT_EXPORT_HISTORY_OPEN_STORAGE_KEY)).toBe('false');
 
       fireEvent.click(handle!);
@@ -1651,7 +1804,7 @@ describe('App', () => {
     expect(container.querySelector('[data-compact-hit-region-id^="history:"]')).toBeNull();
     expect(container.querySelectorAll('#music-player-mount')).toHaveLength(1);
     expect(container.querySelector('.compact-export-history-panel #music-player-mount')).toBeNull();
-    expect(window.localStorage.getItem(COMPACT_EXPORT_HISTORY_OPEN_STORAGE_KEY)).toBeNull();
+    expect(window.localStorage.getItem(COMPACT_EXPORT_HISTORY_OPEN_STORAGE_KEY)).toBe('true');
 
     rerender(<App chatSurfaceMode="compact" compactChatState="input" messages={[message]} />);
 
