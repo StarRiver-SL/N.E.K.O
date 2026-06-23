@@ -11,6 +11,9 @@
     var TRIGGER_WINDOW_MS = 2 * 60 * 1000;
     var PERSISTED_END_WINDOW_MS = 15 * 60 * 1000;
     var TUTORIAL_IDLE_RETRY_MS = 500;
+    var CHOICE_PROMPT_REVEAL_MIN_DELAY_MS = 700;
+    var CHOICE_PROMPT_REVEAL_MAX_DELAY_MS = 1400;
+    var CHOICE_PROMPT_REVEAL_SPEECH_RATIO = 0.18;
     var activeSession = null;
     var pendingStartDay = '';
     var scriptPromise = null;
@@ -266,6 +269,19 @@
         var value = String(text || '');
         if (!value) return 0;
         return Math.min(9000, Math.max(1400, value.length * 120));
+    }
+
+    // 选项揭示延迟：让选项按钮在 assistant 台词上屏、开始播放之后再露出，避免选项与
+    // 台词同时蹦出。注意这只是「视觉」延迟——choicePrompt 仍会立刻下发给 chat host 完成
+    // 输入路由绑定（host 据此把间隙内的自由文本判为 icebreaker free-text 而非普通聊天），
+    // 真正延后的只是按钮的可见性（host 按 revealDelayMs 计时露出）。延迟若改回「扣住
+    // choicePrompt 不下发」会重新打开间隙内输入落到普通聊天的窗口。
+    function computeChoicePromptRevealDelay(text) {
+        var speechDuration = estimateSpeechDurationMs(text);
+        return Math.min(
+            CHOICE_PROMPT_REVEAL_MAX_DELAY_MS,
+            Math.max(CHOICE_PROMPT_REVEAL_MIN_DELAY_MS, speechDuration * CHOICE_PROMPT_REVEAL_SPEECH_RATIO)
+        );
     }
 
     function resolveLanlanName() {
@@ -595,11 +611,12 @@
         });
     }
 
-    function setChoicePrompt(node, localeData) {
+    function setChoicePrompt(node, localeData, revealDelayMs) {
         var prompt = {
             sessionId: activeSession.sessionId,
             gameType: SOURCE,
-            options: buildPromptOptions(node, localeData)
+            options: buildPromptOptions(node, localeData),
+            revealDelayMs: revealDelayMs > 0 ? revealDelayMs : 0
         };
         broadcastIcebreakerChoicePrompt(prompt);
         if (!shouldRenderIcebreakerOnLocalChatHost()) {
@@ -684,26 +701,30 @@
 
     function deliverNode(nodeId) {
         if (!activeSession) return Promise.resolve();
-        var dayConfig = activeSession.dayConfig;
+        var session = activeSession;
+        var localeData = session.localeData;
+        var dayConfig = session.dayConfig;
         var node = dayConfig && dayConfig.nodes ? dayConfig.nodes[nodeId] : null;
         if (!node) return Promise.resolve();
-        activeSession.nodeId = nodeId;
-        markDay(activeSession.day, {
+        session.nodeId = nodeId;
+        markDay(session.day, {
             started: true,
             completed: false,
-            sessionId: activeSession.sessionId,
+            sessionId: session.sessionId,
             nodeId: nodeId,
             updatedAt: Date.now()
         });
-        var text = getText(activeSession.localeData, node.lineKey);
+        var text = getText(localeData, node.lineKey);
         applyAssistantTextEmotion(text);
         return appendChatMessage('assistant', text, {
-            day: activeSession.day,
+            day: session.day,
             nodeId: nodeId,
             voiceKey: node.voiceKey || ''
         }).then(function () {
+            if (activeSession !== session || session.nodeId !== nodeId) return false;
             speakLine(text, node.voiceKey || '');
-            return setChoicePrompt(node, activeSession.localeData);
+            // 立刻下发 choicePrompt 绑定输入路由；按钮可见性由 host 按 revealDelayMs 延后。
+            return setChoicePrompt(node, localeData, computeChoicePromptRevealDelay(text));
         });
     }
 
@@ -845,7 +866,8 @@
                         ? session.dayConfig.nodes[nodeId]
                         : null;
                     if (currentNode) {
-                        setChoicePrompt(currentNode, localeData);
+                        // 同 deliverNode：立刻绑定路由，按钮可见性交给 host 延后揭示。
+                        return setChoicePrompt(currentNode, localeData, computeChoicePromptRevealDelay(fallbackText));
                     }
                 }
                 return null;

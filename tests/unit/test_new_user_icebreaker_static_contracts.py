@@ -510,6 +510,28 @@ def test_icebreaker_choice_submission_is_mutexed_and_restores_prompt_on_failure(
     assert "setChoicePrompt(node, session.localeData);" in handle_choice_block
 
 
+def test_icebreaker_reveals_next_choice_prompt_after_assistant_line_delay():
+    runtime = RUNTIME_PATH.read_text(encoding="utf-8")
+    deliver_node_block = runtime.split("function deliverNode(nodeId)", 1)[1].split(
+        "function completeWithHandoff(option)",
+        1,
+    )[0]
+
+    assert "var CHOICE_PROMPT_REVEAL_MIN_DELAY_MS = 700;" in runtime
+    assert "function computeChoicePromptRevealDelay(text)" in runtime
+    assert "var session = activeSession;" in deliver_node_block
+    assert "var localeData = session.localeData;" in deliver_node_block
+    assert "if (activeSession !== session || session.nodeId !== nodeId) return false;" in deliver_node_block
+    # 揭示延迟改为「只扣视觉」：choicePrompt 立刻下发（绑定输入路由），延迟值随
+    # revealDelayMs 交给 chat host 按 revealAt 延后露出按钮。deliverNode 不再用
+    # promise 把 setChoicePrompt 整体往后拖，避免间隙内输入落到普通聊天。
+    assert "waitBeforeChoicePromptReveal" not in runtime
+    assert "return setChoicePrompt(node, localeData, computeChoicePromptRevealDelay(text));" in deliver_node_block
+    assert deliver_node_block.index("speakLine(text, node.voiceKey || '');") < deliver_node_block.index(
+        "return setChoicePrompt(node, localeData, computeChoicePromptRevealDelay(text));"
+    )
+
+
 def test_icebreaker_handoff_waits_for_context_append_before_route_end():
     runtime = RUNTIME_PATH.read_text(encoding="utf-8")
     handoff_block = runtime.split("function completeWithHandoff(option)", 1)[1].split(
@@ -824,7 +846,9 @@ def test_icebreaker_free_text_fallback_uses_session_snapshot_after_async_append(
     assert "nodeId: nodeId" in continuation_block
     assert "sessionId: sessionId" in continuation_block
     assert "var currentNode = session.dayConfig && session.dayConfig.nodes" in continuation_block
-    assert "setChoicePrompt(currentNode, localeData)" in continuation_block
+    # fallback 同 deliverNode：立刻下发带 revealDelayMs 的 choicePrompt 绑定路由，
+    # 不再用 waitBeforeChoicePromptReveal 整体延后调用。
+    assert "setChoicePrompt(currentNode, localeData, computeChoicePromptRevealDelay(fallbackText))" in continuation_block
     assert "activeSession.localeData" not in continuation_block
     assert "activeSession.day" not in continuation_block
     assert "activeSession.nodeId" not in continuation_block
