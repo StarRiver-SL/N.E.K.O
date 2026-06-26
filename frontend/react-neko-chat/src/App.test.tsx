@@ -1,7 +1,5 @@
 import { useState } from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { dirname, resolve } from 'node:path';
-import { existsSync, readFileSync } from 'node:fs';
 import App, {
   COMPACT_EXPORT_HISTORY_VISIBILITY_ANIMATION_MS,
   COMPACT_TOOL_WHEEL_DETENT_SOUND_SRCS,
@@ -20,6 +18,7 @@ import MessageList from './MessageList';
 import { ACTIVE_AVATAR_TOOLS_STORAGE_KEY } from './avatarTools';
 import { getChatCompanionEmptyStateFallback, getChatEmptyStateFallback } from './chat-copy';
 import { parseChatMessage, type CompactChatState } from './message-schema';
+import compactChatStyles from './styles.css?raw';
 
 describe('App', () => {
   const COMPACT_EXPORT_HISTORY_OPEN_STORAGE_KEY = 'neko.reactChatWindow.compactExportHistoryOpen';
@@ -35,30 +34,6 @@ describe('App', () => {
     COMPACT_INPUT_TOOL_WHEEL_INDEX_STORAGE_KEY,
     ACTIVE_AVATAR_TOOLS_STORAGE_KEY,
   ];
-
-  const readCompactChatStylesForTest = () => {
-    let currentDir = process.cwd();
-
-    for (let depth = 0; depth < 8; depth += 1) {
-      const packageRootCandidate = resolve(currentDir, 'src/styles.css');
-      if (existsSync(packageRootCandidate)) {
-        return readFileSync(packageRootCandidate, 'utf8');
-      }
-
-      const repoRootCandidate = resolve(currentDir, 'frontend/react-neko-chat/src/styles.css');
-      if (existsSync(repoRootCandidate)) {
-        return readFileSync(repoRootCandidate, 'utf8');
-      }
-
-      const parentDir = dirname(currentDir);
-      if (parentDir === currentDir) {
-        break;
-      }
-      currentDir = parentDir;
-    }
-
-    throw new Error(`Could not locate react-neko-chat styles.css from ${process.cwd()}`);
-  };
 
   beforeEach(() => {
     LOCAL_STORAGE_KEYS_TO_RESET.forEach(key => {
@@ -6175,8 +6150,6 @@ describe('App', () => {
   });
 
   it('keeps viewport-fit hidden compact tool wheel slots on the reversed arc', () => {
-    const compactChatStyles = readCompactChatStylesForTest();
-
     expect(compactChatStyles).toMatch(
       /\[data-compact-tool-wheel-layout="viewport-fit"\]\s+\.compact-input-tool-item\[data-compact-tool-wheel-slot="hidden-backward"\][\s\S]*?\{\s*transform:[^}]*-230deg/s,
     );
